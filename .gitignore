@@ -1,0 +1,17 @@
+data/
+checkpoints/
+logs/
+*.jsonl
+*.pt
+*.safetensors
+__pycache__/
+.venv/
+*.egg-info/
+.env
+.env.*
+*.token
+*token*.txt
+hf_home/
+third_party/
+.resolved/
+.DS_Store
