@@ -24,6 +24,10 @@ Shared training knobs that mattered:
 
 Validated V4 teacher trajectories used for the mix are also published as [`zhiyuanhucs/agentic-sft-v4-teacher-v2`](https://huggingface.co/datasets/zhiyuanhucs/agentic-sft-v4-teacher-v2).
 
+The current student-fail distillation collection, strict/hybrid filtering
+policy, measured yield, and open data-quality risks are documented in
+[`docs/v41-clean-thinking-distillation.md`](docs/v41-clean-thinking-distillation.md).
+
 ## Why pretokenize
 
 Handing raw `messages` to Automodel's `ChatDataset` broke two things:
