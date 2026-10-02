@@ -29,7 +29,7 @@
 
 1. **Runner 与模型**：固定 mini-SWE-agent、模型 ID、采样参数、最大 steps、timeout、并发和 retry policy。检查 worker 实际进程的完整参数；只看到 Slurm allocation 为 `RUNNING` 不算 rollout 已启动。
 2. **模型服务**：请求 `/v1/models` 确认模型 ID，再发一次实际 completion 请求。Judge 同样要验证实际 completion，不能只看容器 `Up`。
-3. **隔离**：从实际 task container 验证网络策略；确认不能连接公开网络、代码托管站、上游答案源或 benchmark grader。只检查宿主机策略或配置文件不够。
+3. **隔离**：从实际 task container 验证网络策略；确认不能连接公开网络、代码托管站、上游答案源、teacher endpoint 或 benchmark grader。检查最终 resolved policy 和容器的实际网络配置；只检查输入 YAML 不够。
 4. **仓库与测试**：从干净 checkout 构建 task overlay；清除答案文件和未来 Git 历史。官方 test patch 必须完整、原子应用；所有必需 F2P/P2P 测试需有明确状态，缺失状态按 verifier-invalid 处理，不能默认通过。
 5. **工具环境**：确认 Harbor/mini-SWE-agent setup 成功、所需依赖可用、模型路由健康。隔离策略若允许内部只读依赖源，要单独验证它不会转发答案或开放任意网络。
 6. **Prompt**：固定 mini-SWE-agent 官方任务提示；网络隔离、任务环境清理和事后审计负责数据边界。不要在 prompt 中罗列 `hidden tests`、上游答案、记忆补丁、禁止的 Git 命令等具体答案来源或违规方式，这些词会进入并污染 raw thinking。不能把“提示已传入”当作行为符合的证据。
@@ -85,6 +85,12 @@ Canary 有 API 错误、setup 失败、测试 patch 冲突、缺失测试状态�
 一次 183-task 试跑把“不要回忆上游实现/hidden tests、不要查看 Git 历史、不要修改测试”等规则追加到 system prompt。终止前有 8 条终态轨迹，其中 5 条 verifier reward=1；这 5 条全部未通过 strict 审计，并含答案重建、raw-thinking 污染和 prompt-policy 泄漏标签。抽查的 thinking 直接复述了 prompt 中的 hidden-test、上游实现和测试限制措辞，部分还明确推演或回忆上游修复。这个小样本显示该 prompt 写法会污染 thinking，但不足以单独估计正式成功率。
 
 后续 183-task cohort 保持相同任务清单、mini-SWE-agent harness、1000-step 上限和 no-egress task environment，移除该 addendum，使用官方任务提示并保留原有离线审计门槛。前一批输出保留为 prompt 诊断记录，不计入 strict 产量；新批次需等完整结果和轨迹审计后再估计 clean yield。
+
+### 2026-10-02 teacher endpoint 网络边界修复
+
+运行时检查发现 AgentCompass planner 曾将模型 endpoint 自动并入显式 `no-network` rollout policy，使任务容器实际拿到仅允许访问 teacher endpoint 的 allowlist。该 cohort 在产生终态前停止，任务容器与 proxy sidecar 已清理，输出保留为配置诊断且不计数据。修复后，planner 保留显式 `no-network`；mini-SWE-agent 的模型请求由外部 runner 发出，所以容器不需要访问 teacher。一个 canary 的 run metadata 显示最终 rollout policy 为 `no-network`，Docker task container 的 network 为 `none`，同时 runner 成功向 teacher 发起请求并继续执行工具。
+
+该 canary 还关闭了 AgentCompass 自动插入任务输入的网络限制提示，避免污染 raw thinking；网络边界仍由代理/容器策略执行。后续每个 cohort 都需核对最终 policy、task container 网络、prompt 参数和真实模型请求链路，四者都符合预期后才扩量。
 
 ## 每次发布前的报告字段
 
