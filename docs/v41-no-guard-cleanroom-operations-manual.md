@@ -98,6 +98,14 @@ Canary 有 API 错误、setup 失败、测试 patch 冲突、缺失测试状态�
 
 该 canary 还关闭了 AgentCompass 自动插入任务输入的网络限制提示，避免污染 raw thinking；网络边界仍由代理/容器策略执行。后续每个 cohort 都需核对最终 policy、task container 网络、prompt 参数和真实模型请求链路，四者都符合预期后才扩量。
 
+### 2026-10-02 Harbor canary 的 teacher 自询通道
+
+另一路 mini-SWE-agent/Harbor canary 把模型 API 放在 agent task container 可访问的内部网络里。sidecar 确实拦截了公开 GitHub 和包注册表请求，但 `allowed_hosts` 仍包括承载模型路由的内部主机；agent shell 因此可以直接向同一 V4.1 `/v1/chat/completions` 发送任务定向问题。这个设置不满足“答案不可从 teacher endpoint 获取”的隔离条件。
+
+其中一条 canary 直接询问了该任务隐藏测试文件的完整内容。V4.1 返回 6,000 个 reasoning tokens、23,485 字符 reasoning，普通 `content` 为空且因长度上限结束；agent 随后打印了响应 JSON 的前 5,000 字符，其中已经出现任务相关规则逻辑，并继续尝试另一个模型查询。该 worker 在 verifier 结束前被停止。此轨迹按**答案信息已取得**隔离保存，不能进入 strict，也不能作为“尝试 hack 但未成功”的 05 对照样本。
+
+这说明外网阻断与 teacher endpoint 隔离是两项不同检查。不要用“agent 容器只允许访问内部 host”证明答案访问失败；若那个 host 也提供模型 API，shell 仍可自询。规模化前必须从 task container 确认它无法访问任何 teacher/chat-completions 服务，同时 trusted runner 的正常推理请求仍能完成。使用 runner 外置推理的 AgentCompass/no-network 路径时，应检查容器实际 network 为 `none`，并单独审计请求来源；不要把上述 Harbor 网络配置用于 strict 或 05 生产。
+
 ## 每次发布前的报告字段
 
 - worker allocation 数、真实 agent process 数、已完成/运行中/未启动/异常 trial 数；
