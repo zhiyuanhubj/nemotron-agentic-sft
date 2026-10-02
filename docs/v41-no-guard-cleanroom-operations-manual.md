@@ -32,7 +32,7 @@
 3. **隔离**：从实际 task container 验证网络策略；确认不能连接公开网络、代码托管站、上游答案源或 benchmark grader。只检查宿主机策略或配置文件不够。
 4. **仓库与测试**：从干净 checkout 构建 task overlay；清除答案文件和未来 Git 历史。官方 test patch 必须完整、原子应用；所有必需 F2P/P2P 测试需有明确状态，缺失状态按 verifier-invalid 处理，不能默认通过。
 5. **工具环境**：确认 Harbor/mini-SWE-agent setup 成功、所需依赖可用、模型路由健康。隔离策略若允许内部只读依赖源，要单独验证它不会转发答案或开放任意网络。
-6. **Prompt**：数据边界规则放在 agent system prompt。只把规则追加到 benchmark user prompt 的试跑中，21 个 verifier 成功样本均未通过轨迹审计；因此不可把“提示已传入”当作行为符合的证据。
+6. **Prompt**：固定 mini-SWE-agent 官方任务提示；网络隔离、任务环境清理和事后审计负责数据边界。不要在 prompt 中罗列 `hidden tests`、上游答案、记忆补丁、禁止的 Git 命令等具体答案来源或违规方式，这些词会进入并污染 raw thinking。不能把“提示已传入”当作行为符合的证据。
 
 Canary 有 API 错误、setup 失败、测试 patch 冲突、缺失测试状态或答案自查询时，先停在该 cohort 做诊断；不要将这些结果并入普通模型失败分母。
 
@@ -78,7 +78,13 @@ Canary 有 API 错误、setup 失败、测试 patch 冲突、缺失测试状态�
 
 ## 2026-10-02 Pro Verified seed 运行快照
 
-首轮 80 次完成、27 次 verifier 成功；其后的用户消息 strict replay 完成 68 次、21 次 verifier 成功。两批有重复 task：合并后 90 个唯一任务，30 个任务至少成功一次；148 是 attempts 总数，不能当作独立 task 成功率。已完成样本的 strict 审计通过数为 0。用户消息级的追加规则不足以产出合格轨迹，因此后续 cohort 应确认规则确实进入 mini-SWE-agent system prompt，并继续逐条离线审计；system prompt 也不是准入证据。
+首轮 80 次完成、27 次 verifier 成功；其后的用户消息 strict replay 完成 68 次、21 次 verifier 成功。两批有重复 task：合并后 90 个唯一任务，30 个任务至少成功一次；148 是 attempts 总数，不能当作独立 task 成功率。已完成样本的 strict 审计通过数为 0。用户消息级的追加规则不足以产出合格轨迹，因此仍须逐条离线审计；prompt 本身不是准入证据。
+
+### 2026-10-02 strict system prompt 诊断
+
+一次 183-task 试跑把“不要回忆上游实现/hidden tests、不要查看 Git 历史、不要修改测试”等规则追加到 system prompt。终止前有 8 条终态轨迹，其中 5 条 verifier reward=1；这 5 条全部未通过 strict 审计，并含答案重建、raw-thinking 污染和 prompt-policy 泄漏标签。抽查的 thinking 直接复述了 prompt 中的 hidden-test、上游实现和测试限制措辞，部分还明确推演或回忆上游修复。这个小样本显示该 prompt 写法会污染 thinking，但不足以单独估计正式成功率。
+
+后续 183-task cohort 保持相同任务清单、mini-SWE-agent harness、1000-step 上限和 no-egress task environment，移除该 addendum，使用官方任务提示并保留原有离线审计门槛。前一批输出保留为 prompt 诊断记录，不计入 strict 产量；新批次需等完整结果和轨迹审计后再估计 clean yield。
 
 ## 每次发布前的报告字段
 
