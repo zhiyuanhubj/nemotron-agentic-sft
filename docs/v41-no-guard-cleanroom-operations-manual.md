@@ -30,11 +30,13 @@
 1. **Runner 与模型**：固定 mini-SWE-agent、模型 ID、采样参数、最大 steps、timeout、并发和 retry policy。检查 worker 实际进程的完整参数；只看到 Slurm allocation 为 `RUNNING` 不算 rollout 已启动。
 2. **模型服务**：请求 `/v1/models` 确认模型 ID，再发一次实际 completion 请求。Judge 同样要验证实际 completion，不能只看容器 `Up`。
 3. **隔离**：从实际 task container 验证网络策略；确认不能连接公开网络、代码托管站、上游答案源、teacher endpoint 或 benchmark grader。检查最终 resolved policy 和容器的实际网络配置；只检查输入 YAML 不够。
-4. **仓库与测试**：从干净 checkout 构建 task overlay；清除答案文件和未来 Git 历史。官方 test patch 必须完整、原子应用；所有必需 F2P/P2P 测试需有明确状态，缺失状态按 verifier-invalid 处理，不能默认通过。
+4. **仓库与测试**：从干净 checkout 构建 task overlay；清除答案文件和原始 Git 历史。官方 test patch 必须完整、原子应用；所有必需 F2P/P2P 测试需有明确状态，缺失状态按 verifier-invalid 处理，不能默认通过。
 5. **工具环境**：确认 Harbor/mini-SWE-agent setup 成功、所需依赖可用、模型路由健康。隔离策略若允许内部只读依赖源，要单独验证它不会转发答案或开放任意网络。
 6. **Prompt**：固定 mini-SWE-agent 2.4.5 的官方 `swebench.yaml` instance template，不添加安全规则型 system prompt 或 task prompt。网络隔离、任务环境清理和事后审计负责数据边界；prompt 不应列举上游答案、隐藏测试、缓存或外部来源等具体规避对象。不能把“提示已传入”当作行为符合的证据。
 
 Canary 有 API 错误、setup 失败、测试 patch 冲突、缺失测试状态或答案自查询时，先停在该 cohort 做诊断；不要将这些结果并入普通模型失败分母。
+
+AgentCompass 的 Pro Verified 准备代码会删除 agent 工作区原有 `.git`，再对当前基线快照初始化单提交仓库。因此原始提交历史和未来提交不可访问；但 agent 仍可能尝试 `git log`、`git show`、`git fsck` 等探查。strict 按动作意图审计，这些尝试仍然不合格，不能因为仓库已清理或网络已断开而放行。
 
 ## Rollout 与资源调度
 
@@ -69,6 +71,8 @@ Canary 有 API 错误、setup 失败、测试 patch 冲突、缺失测试状态�
 | `verifier_invalid` | test patch 冲突、必需测试未运行、coverage 缺失或 scorer 假阳性；修复后用新 cohort 重评 |
 | `agent_timeout` | 单独报告耗时、steps 和部分 patch；不自动记为普通 reward=0 |
 | `answer_access_unknown` | 缺少请求/响应证据，不能推断为“未成功获取答案” |
+
+`fail_to_pass_missing` 本身不能证明 verifier 或测试 runner 有故障。需要连同 `eval_raw_data.tests`、stdout/stderr、patch 和 F2P/P2P 清单一起核对。若缺失测试对应的包因模型补丁编译失败，或测试确实失败，应记为有效模型失败；只有证明必需测试没有运行、测试 overlay 冲突或 scorer 解析错误，才记为 verifier-invalid。`Requested output files missing: /app/patch.txt` 表示没有可评分提交，单凭这一条不归因于基建。
 
 ### 已观察到的批次异常（2026-10-01 快照）
 
