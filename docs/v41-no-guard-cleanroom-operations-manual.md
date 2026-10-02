@@ -98,11 +98,13 @@ AgentCompass 的 Pro Verified 准备代码会删除 agent 工作区原有 `.git`
 
 这批数据说明，1000-step 上限可能让个别无进展轨迹消耗很长时间，增加上限并不能保证产出 patch；过高的 shell command timeout 也会让一次低价值搜索占用数十分钟。当前运行使用 `command_timeout=2400`，只影响未来新启动的 `run_cleanroom_v41_seed.sh` 已改为默认 600 秒并允许通过 `COMMAND_TIMEOUT` 显式覆盖；在扩大 cohort 前，先用 canary 确认典型构建和测试命令可在该预算内完成。批量扩容前还应单独统计步数耗尽率、达到步数上限的耗时、最后若干步的 patch/test 进展和缺 patch 比例；评估可用的无进展提前停止策略后，再调整步数预算。不要把本批 10/57 的 verifier 通过率解读为整个 Pro Verified 的基准 pass@1：样本来自 Nemotron 未解决任务子集，且本 cohort 的 10 条成功轨迹均未通过 strict。
 
-### 2026-10-02 AgentCompass task-prompt 前缀修正
+### 2026-10-02 no-egress prompt 来源核对
 
-检查 no-egress 轨迹后发现，mini-SWE-agent 的 system/instance template 与上游 v2.4.5 配置一致，但 AgentCompass 的 Pro Verified benchmark 还在 issue 前额外添加了“不要访问代码托管站、module proxy、缓存”等来源限制。这些句子不属于上游 [mini-SWE-agent v2.4.5 SWE-bench 配置](https://github.com/SWE-agent/mini-swe-agent/blob/v2.4.5/src/minisweagent/config/benchmarks/swebench.yaml)，可能诱发 raw thinking 复述限制并被审计标成 `guard_policy_leakage`。本地 benchmark 前缀已改为只提供仓库路径和 issue 内容；隔离仍由 `network_mode: none` 执行，不在模型提示中列出具体答案来源。
+核对六个 `no_teacher_egress_part1..6` 的 `run_info.json` 后确认，实际运行参数 `inject_network_restriction_notice=false`；抽查保存的原始输入也未出现 AgentCompass 额外注入的网络访问限制提示。因此这六个 worker 使用的是 no-egress cohort，不应再按“旧网络提示 prompt cohort”解释其结果。
 
-已启动的 `no_teacher_egress_part1..6` 进程在启动时载入旧前缀，必须按旧 prompt cohort 审计和统计。后续 30 个既有成功候选先分成 6 条单任务 canary；确认每条都完成实际测试、没有 test-discovery/parser error，且保存的 task prompt 不再含旧限制语句后，调度器才启动其余 24 条。不同 prompt cohort 的结果不得合并计算成功率。
+原始输入仍包含锁定的 mini-SWE-agent 2.4.5 官方 [`swebench.yaml`](https://github.com/SWE-agent/mini-swe-agent/blob/v2.4.5/src/minisweagent/config/benchmarks/swebench.yaml) instance template，其中有只修改非测试文件、patch 提交步骤等通用任务说明。这些是 baseline harness 的官方提示，不是 AgentCompass 的网络提示。审计遇到 `guard_policy_leakage` 标签时，应检查具体 raw evidence，区分模型复述官方工作流与复述自定义网络限制；仍须独立审查答案重建、raw-thinking 污染和 hacking 行为。当前六分片中 10 条 verifier-positive 轨迹都因答案重建和 raw-thinking 污染被拒，故区分提示来源不会改变当前 strict 合格数为 0 的结论。
+
+cleanroom 启动器默认不注入网络限制提示；隔离仍通过最终 rollout policy 和 task container 的 `network=none` 实施。启动后要从 `run_info.json` 和原始第一轮输入复核参数和实际 prompt，不以启动脚本默认值替代运行证据。
 
 ### 2026-10-02 teacher endpoint 网络边界修复
 
