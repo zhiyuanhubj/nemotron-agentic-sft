@@ -102,7 +102,9 @@ AgentCompass 的 Pro Verified 准备代码会删除 agent 工作区原有 `.git`
 
 核对六个 `no_teacher_egress_part1..6` 的 `run_info.json` 后确认，实际运行参数 `inject_network_restriction_notice=false`；抽查保存的原始输入也未出现 AgentCompass 额外注入的网络访问限制提示。因此这六个 worker 使用的是 no-egress cohort，不应再按“旧网络提示 prompt cohort”解释其结果。
 
-原始输入仍包含锁定的 mini-SWE-agent 2.4.5 官方 [`swebench.yaml`](https://github.com/SWE-agent/mini-swe-agent/blob/v2.4.5/src/minisweagent/config/benchmarks/swebench.yaml) instance template，其中有只修改非测试文件、patch 提交步骤等通用任务说明。这些是 baseline harness 的官方提示，不是 AgentCompass 的网络提示。审计遇到 `guard_policy_leakage` 标签时，应检查具体 raw evidence，区分模型复述官方工作流与复述自定义网络限制；仍须独立审查答案重建、raw-thinking 污染和 hacking 行为。当前六分片中 10 条 verifier-positive 轨迹都因答案重建和 raw-thinking 污染被拒，故区分提示来源不会改变当前 strict 合格数为 0 的结论。
+原始输入包含锁定的 mini-SWE-agent 2.4.5 官方 [`swebench.yaml`](https://github.com/SWE-agent/mini-swe-agent/blob/v2.4.5/src/minisweagent/config/benchmarks/swebench.yaml) instance template。除 patch 提交流程外，它还要求每轮输出 `THOUGHT`、至少执行 shell 命令、只改非测试源码、创建复现脚本并运行测试；这些工作流文字来自官方模板，不是 SWE-bench 题目，也不是 AgentCompass 的网络限制 addendum。它会影响 thinking 的长度和内容，是比较简化 prompt 时必须固定或单独标记的实验变量。审计遇到 `guard_policy_leakage` 标签时，应检查具体 raw evidence，区分模型复述官方工作流与复述自定义网络限制；仍须独立审查答案重建、raw-thinking 污染和 hacking 行为。
+
+截至 2026-10-02 21:54 UTC，六个 no-egress 主分片有 101 条唯一任务终态，verifier-positive 22 条（21.8%），strict 合格 0。静态高召回规则将这 22 条全部标记为 `explicit_answer_reconstruction`、`raw_thinking_contamination`、`git_metadata_or_history_probe` 和 `guard_policy_leakage`；其中另有 15 条触发全局/替代来源搜索和测试修改规则。它们目前是待逐条语义复核的候选，不应把规则标签直接解释成“已成功获得答案”，也不应在没有请求/响应证据时放入 `05 / answer_not_obtained`。新审计输出要分别记录尝试动作、是否观察到答案信息、任务 verifier 结果和 thinking 来源线索。
 
 cleanroom 启动器默认不注入网络限制提示；隔离仍通过最终 rollout policy 和 task container 的 `network=none` 实施。启动后要从 `run_info.json` 和原始第一轮输入复核参数和实际 prompt，不以启动脚本默认值替代运行证据。
 
