@@ -42,7 +42,7 @@ AgentCompass 的 Pro Verified 准备代码会删除 agent 工作区原有 `.git`
 
 - 固定唯一 run ID 和 task manifest；每个 worker 一个互斥分片。
 - 采用保守并发起步：每节点最多 2 个 agent。先根据实际任务耗时、模型 endpoint 延迟和 error rate 扩容，不按 GPU 利用率单独判断吞吐。
-- 给每道题设置明确的 step、agent wall-clock、单条命令 timeout 和 token 上限；报告每项实际配置。步数/时间耗尽记为 timeout，不自动归类成模型失败。
+- 给每道题设置明确的 step、agent wall-clock、单条命令 timeout 和 token 上限；报告每项实际配置。`step_limit_exhausted` 与 wall-clock/API `agent_timeout` 分开统计，两者都不自动归类成普通模型失败。
 - 对短暂 API、镜像拉取或启动故障使用有界重试；普通 verifier reward=0 不自动重跑。
 - 任何 INT/TERM、节点被回收或 controller 消失时，先查是否产生完整 `result.json`、trajectory 和 verifier 输出。没有终态结果的任务记为 unscored/infra-invalid。
 - 通过文件更新时间和实际进程确认 worker 在推进；allocation 存在、容器 `Up`、GPU 有利用率均不能代替结果文件进展。
@@ -89,6 +89,14 @@ AgentCompass 的 Pro Verified 准备代码会删除 agent 工作区原有 `.git`
 一次 183-task 试跑把“不要回忆上游实现/hidden tests、不要查看 Git 历史、不要修改测试”等规则追加到 system prompt。终止前有 8 条终态轨迹，其中 5 条 verifier reward=1；这 5 条全部未通过 strict 审计，并含答案重建、raw-thinking 污染和 prompt-policy 泄漏标签。抽查的 thinking 直接复述了 prompt 中的 hidden-test、上游实现和测试限制措辞，部分还明确推演或回忆上游修复。这个小样本显示该 prompt 写法会污染 thinking，但不足以单独估计正式成功率。
 
 后续 183-task cohort 保持相同任务清单、mini-SWE-agent harness、1000-step 上限和 no-egress task environment，移除该 addendum，使用官方任务提示并保留原有离线审计门槛。前一批输出保留为 prompt 诊断记录，不计入 strict 产量；新批次需等完整结果和轨迹审计后再估计 clean yield。
+
+### 2026-10-02 no-egress 首轮的步数耗尽与缺 patch
+
+截至 19:41 UTC，Pro Verified Nemotron-fail 子集的六个 no-egress 分片有 63 条终态：57 条有完整 `result.json`，其中 verifier 通过 10 条；另外 6 条以 `Requested output files missing: /app/patch.txt` 结束。离线审计覆盖到的 10 条通过轨迹全部有 `explicit_answer_reconstruction` 和 `raw_thinking_contamination`，strict 合格唯一任务为 0。
+
+6 条缺 patch 结果中有 2 条确实跑满 1000 步后仍未写出 patch；单条耗时约 109 分钟，最终状态是 `run_error`，不是 API 超时、verifier 异常或可评分的 reward=0。其余 4 条在 14、89、121、168 步时结束并缺少 patch。应将它们记作 `no_patch_output`，再按轨迹判断是 agent 提前结束还是步数耗尽；不能统一归入基建故障，也不能只因错误字符串中提到输出文件就判为 verifier-invalid。
+
+这批数据说明，1000-step 上限可能让个别无进展轨迹消耗很长时间，增加上限并不能保证产出 patch。批量扩容前应单独统计步数耗尽率、达到步数上限的耗时、最后若干步的 patch/test 进展和缺 patch 比例；评估可用的无进展提前停止策略后，再调整预算。不要把本批 10/57 的 verifier 通过率解读为整个 Pro Verified 的基准 pass@1：样本来自 Nemotron 未解决任务子集，且本 cohort 的 10 条成功轨迹均未通过 strict。
 
 ### 2026-10-02 AgentCompass task-prompt 前缀修正
 
