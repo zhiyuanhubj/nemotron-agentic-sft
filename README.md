@@ -27,6 +27,9 @@ Validated V4 teacher trajectories used for the mix are also published as [`zhiyu
 The current student-fail distillation collection, strict/hybrid filtering
 policy, measured yield, and open data-quality risks are documented in
 [`docs/v41-clean-thinking-distillation.md`](docs/v41-clean-thinking-distillation.md).
+The reusable no-guard cleanroom runbook, audit gates, failure classification,
+and reporting fields are in
+[`docs/v41-no-guard-cleanroom-operations-manual.md`](docs/v41-no-guard-cleanroom-operations-manual.md).
 
 ## Why pretokenize
 
