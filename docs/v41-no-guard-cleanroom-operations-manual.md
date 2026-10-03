@@ -148,3 +148,11 @@ cleanroom 启动器默认不注入网络限制提示；隔离仍通过最终 rol
 part1 的 worker 被中断后，原 AgentCompass run id 已存在，直接以相同 `--run-id` 重启会在 preflight 报 `Run id already exists`。正确恢复方式是用新的输出 id，并以 `--reuse <原 run id>` 指向旧结果；AgentCompass 随后复制可用 checkpoint 并继续未完成任务。不能把 `--reuse <原 run id>` 和相同的 `--run-id` 混用。恢复后进度需核对 `reused_tasks`、`pending_tasks`、`running_tasks` 和 checkpoint 错误；checkpoint 缺 evaluation record 的任务需要重新执行。
 
 2026-10-03 03:39 UTC 已对首轮中无 verifier 成功的 100 个 task 安排一次补充 rollout，按 4 个互斥 shard 分发到 2332、2334、2391、2392；不重复首轮已成功的 26 个 task，也不与仍在恢复的 part1 重叠。2018 负责恢复 part1，2333 继续完成 SWE-ReBench canary。此时 6 个 distill allocation 中 5 个已观测到 GPU 负载；这些进度数字是运行快照，之后应从各自 `progress.json` 和 GPU 采样重新核对。
+
+### 2026-10-03 guarded 生产线事故与恢复
+
+一组在线 thinking guard 随交互会话结束而退出，造成约 52 条 ReBench 和 39 条 Pro Verified guarded rollout 的推理连接错误。它们是 `infra_invalid`，不能当作 V4.1 解题失败，也不能放进成功率分母。恢复时须把 guard 作为独立持久服务运行，并在每批启动前及运行中检查其版本、健康接口、上游 V4.1 与 Qwen judge 的模型 ID；失败任务使用新的 run ID，保留旧错误轨迹。
+
+恢复批次使用互斥任务清单、每节点 2 个 agent、一次正常 rollout 和有限的瞬态 API 重试。Pro Verified 的 39 个连接错误任务已分成两个恢复批次，另有 20 个未跑过的候选；ReBench 的 36 个配对验证失败任务分成两个恢复批次。另一个节点换机后需重新加载 V4.1 权重，服务就绪才自动启动 20 题 guarded 批次。先前 V4.1 `reward=1` 仅用于选题，原轨迹的 hacking 或 thinking 污染不会因重跑计划而变成合格数据；新轨迹仍须单独通过 verifier 和离线全轨迹审计。
+
+截至 14:45 UTC，严格按完整 Nemotron 失败证据配对的 clean 唯一任务为 **7**，宽口径 clean 为 **17**。报告应始终分开这两个分母。发布流程曾引用已经到期的计算分配，自动同步中断；改为现存分配后已重新开始全量构建，仍须检查上传完成日志和远端文件，再宣称 HF 已更新。
