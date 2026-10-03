@@ -135,8 +135,16 @@ cleanroom 启动器默认不注入网络限制提示；隔离仍通过最终 rol
 
 ### 2026-10-03 ReBench V2 canary 的 verifier 依赖隔离问题
 
-`v41_swerebenchv2_verified_nemotron_fail_20261002_no_guard_cleanroom_canary25_worker_2333_all` 是 SWE-ReBench V2 对照批次，不是官方 Pro Verified 731 题 baseline。到 2026-10-03 03:20 UTC，25 题中 21 题已评分，全部 `reward=0`，没有 Harbor exception；另有 2 条运行中、2 条待跑。21 条 verifier 日志里有 18 条出现 DNS、依赖下载或外部服务不可达信号，3 个测试套件没有解析出测试结果。这个 0/21 不能作为模型能力成功率。
+`v41_swerebenchv2_verified_nemotron_fail_20261002_no_guard_cleanroom_canary25_worker_2333_all` 是 SWE-ReBench V2 对照批次，不是官方 Pro Verified 731 题 baseline。到 2026-10-03 03:21 UTC，25 题中 22 题已评分，全部 `reward=0`，没有 Harbor exception；另有 2 条运行中、1 条待跑。22 条 verifier 日志里有 18 条出现 DNS、依赖下载或外部服务不可达信号，3 个测试套件没有解析出测试结果。这个 0/22 不能作为模型能力成功率。
 
 根因已在实际生成的 `cleanroom-overlay.json` 与 task overlay 中确认：agent 和 environment 均被设置成 `no-network`，Docker Compose 也将 task container 固定为 `network_mode: none`。一些源 task 的 `[verifier]` 虽声明了 `allowed_hosts`，但该环境覆盖会阻断 verifier/test script 在容器内访问包注册表或测试所需外部服务。对照任务中可见 npm 注册表、Go module proxy、GitHub release 和外部 API/数据源失败。静态网络错误信号不自动证明某条具体 F2P 测试必然因基建失败；必须结合该测试的失败输出判断，并将“模型补丁确实未满足测试”与“所需依赖/服务不可用”分开标记。
 
 后续 no-egress cohort 必须在 agent rollout 前确认 verifier 的必需测试能在实际隔离环境中运行：锁定依赖应由可信 setup 阶段预取并缓存；需要外部数据的测试要准备固定本地 fixture；缺少依赖或必需测试未执行时，先标记 `infra_invalid` / `verifier_invalid`，不计为模型失败，也不纳入 pass@1 分母。agent tool container 仍保持 `network=none`，不得为解决测试依赖而让模型 shell 获得互联网或 teacher endpoint 访问。批次统计需列出已评分、基础设施异常、未运行测试和有效测试失败四类计数。
+
+### 2026-10-03 Pro Verified no-egress 首轮和恢复方式
+
+冻结的 Nemotron 已完成失败子集中筛出 152 个此前没有 V4.1 verifier 成功的唯一 task，语言为 Go 60、Python 53、JavaScript 36、TypeScript 3。no-teacher-egress 首轮每题计划一个 rollout。截至 2026-10-03 03:35 UTC，已启动 147 次，产生 134 个可审计 `result.json`，其中 verifier reward=1 有 29 次（占已启动 rollout 的 19.7%，占有结果记录的 21.6%）；part1 尚未完成。当前静态高召回审计把 29 条成功轨迹都标记为答案重建/thinking 污染，因此 strict 仍为 0。该比例只描述 Nemotron-fail 子集的 V4.1 首轮产出，不是 Pro Verified baseline pass@1；答案访问标签须结合原始 action 和实际信息观察证据逐条复核。
+
+part1 的 worker 被中断后，原 AgentCompass run id 已存在，直接以相同 `--run-id` 重启会在 preflight 报 `Run id already exists`。正确恢复方式是用新的输出 id，并以 `--reuse <原 run id>` 指向旧结果；AgentCompass 随后复制可用 checkpoint 并继续未完成任务。不能把 `--reuse <原 run id>` 和相同的 `--run-id` 混用。恢复后进度需核对 `reused_tasks`、`pending_tasks`、`running_tasks` 和 checkpoint 错误；checkpoint 缺 evaluation record 的任务需要重新执行。
+
+2026-10-03 03:39 UTC 已对首轮中无 verifier 成功的 100 个 task 安排一次补充 rollout，按 4 个互斥 shard 分发到 2332、2334、2391、2392；不重复首轮已成功的 26 个 task，也不与仍在恢复的 part1 重叠。2018 负责恢复 part1，2333 继续完成 SWE-ReBench canary。此时 6 个 distill allocation 中 5 个已观测到 GPU 负载；这些进度数字是运行快照，之后应从各自 `progress.json` 和 GPU 采样重新核对。
