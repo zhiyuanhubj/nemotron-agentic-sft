@@ -132,3 +132,11 @@ cleanroom 启动器默认不注入网络限制提示；隔离仍通过最终 rol
 - 所有尚未解决的 verifier、隔离、答案访问或训练准入风险。
 
 不在完成离线审计前上传候选为 strict/05，不因 verifier reward、任务容器隔离配置或模型服务健康探针单独放行。
+
+### 2026-10-03 ReBench V2 canary 的 verifier 依赖隔离问题
+
+`v41_swerebenchv2_verified_nemotron_fail_20261002_no_guard_cleanroom_canary25_worker_2333_all` 是 SWE-ReBench V2 对照批次，不是官方 Pro Verified 731 题 baseline。到 2026-10-03 03:20 UTC，25 题中 21 题已评分，全部 `reward=0`，没有 Harbor exception；另有 2 条运行中、2 条待跑。21 条 verifier 日志里有 18 条出现 DNS、依赖下载或外部服务不可达信号，3 个测试套件没有解析出测试结果。这个 0/21 不能作为模型能力成功率。
+
+根因已在实际生成的 `cleanroom-overlay.json` 与 task overlay 中确认：agent 和 environment 均被设置成 `no-network`，Docker Compose 也将 task container 固定为 `network_mode: none`。一些源 task 的 `[verifier]` 虽声明了 `allowed_hosts`，但该环境覆盖会阻断 verifier/test script 在容器内访问包注册表或测试所需外部服务。对照任务中可见 npm 注册表、Go module proxy、GitHub release 和外部 API/数据源失败。静态网络错误信号不自动证明某条具体 F2P 测试必然因基建失败；必须结合该测试的失败输出判断，并将“模型补丁确实未满足测试”与“所需依赖/服务不可用”分开标记。
+
+后续 no-egress cohort 必须在 agent rollout 前确认 verifier 的必需测试能在实际隔离环境中运行：锁定依赖应由可信 setup 阶段预取并缓存；需要外部数据的测试要准备固定本地 fixture；缺少依赖或必需测试未执行时，先标记 `infra_invalid` / `verifier_invalid`，不计为模型失败，也不纳入 pass@1 分母。agent tool container 仍保持 `network=none`，不得为解决测试依赖而让模型 shell 获得互联网或 teacher endpoint 访问。批次统计需列出已评分、基础设施异常、未运行测试和有效测试失败四类计数。
