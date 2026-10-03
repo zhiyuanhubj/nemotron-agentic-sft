@@ -158,3 +158,5 @@ part1 的 worker 被中断后，原 AgentCompass run id 已存在，直接以相
 截至 14:45 UTC，严格按完整 Nemotron 失败证据配对的 clean 唯一任务为 **7**，宽口径 clean 为 **17**。报告应始终分开这两个分母。发布流程曾引用已经到期的计算分配，自动同步中断；改为现存分配后已重新开始全量构建，仍须检查上传完成日志和远端文件，再宣称 HF 已更新。
 
 后续进一步定位到登录节点的采集 supervisor 被 `systemd-oomd` 反复杀掉，导致其子进程中的审计、依赖代理和 HF publisher 一起中断；模型计算节点上的 Docker 服务与 rollout 不依赖该 supervisor 的进程生命周期。需查看 user service 的 `NRestarts` 和 journal，而不能只看 watcher 当前有 PID。已经给 supervisor 和独立 guard 服务设置 OOM 选择保护；长时间的 HF 导出应迁出 supervisor 单独运行，并在迁移后确认 Hub revision，避免“构建开始”被误报为“上传完成”。
+
+14:58 UTC 的节点调度：换机节点的 V4.1 服务已就绪，guard 健康检查通过，20 题严格分支正在预取环境镜像。两个 ReBench guarded 分片中，前 4 个终态全部因为 thinking/action 策略拒绝而未评分；保留一个分片作为严格对照，另一个分片停止后用同一冻结任务清单启动**独立**断网 no-guard 分支。新分支采用 mini-SWE-agent 的 low reasoning effort、1000-step 上限和每节点并发 2；任务容器无网络，runner 从宿主机调用 V4.1。此分支的 `reward=1` 只是 05 候选，仍需逐条证明未取得答案。不要把 guarded 的中止结果和 no-guard 的新 rollout 当作同一次评分。
