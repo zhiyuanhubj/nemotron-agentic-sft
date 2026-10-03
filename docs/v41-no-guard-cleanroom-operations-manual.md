@@ -160,3 +160,11 @@ part1 的 worker 被中断后，原 AgentCompass run id 已存在，直接以相
 后续进一步定位到登录节点的采集 supervisor 被 `systemd-oomd` 反复杀掉，导致其子进程中的审计、依赖代理和 HF publisher 一起中断；模型计算节点上的 Docker 服务与 rollout 不依赖该 supervisor 的进程生命周期。需查看 user service 的 `NRestarts` 和 journal，而不能只看 watcher 当前有 PID。已经给 supervisor 和独立 guard 服务设置 OOM 选择保护；长时间的 HF 导出应迁出 supervisor 单独运行，并在迁移后确认 Hub revision，避免“构建开始”被误报为“上传完成”。
 
 14:58 UTC 的节点调度：换机节点的 V4.1 服务已就绪，guard 健康检查通过，20 题严格分支正在预取环境镜像。两个 ReBench guarded 分片中，前 4 个终态全部因为 thinking/action 策略拒绝而未评分；保留一个分片作为严格对照，另一个分片停止后用同一冻结任务清单启动**独立**断网 no-guard 分支。新分支采用 mini-SWE-agent 的 low reasoning effort、1000-step 上限和每节点并发 2；任务容器无网络，runner 从宿主机调用 V4.1。此分支的 `reward=1` 只是 05 候选，仍需逐条证明未取得答案。不要把 guarded 的中止结果和 no-guard 的新 rollout 当作同一次评分。
+
+### 2026-10-03 15:31 UTC 节点与导出核查
+
+共享账号 `xgen-mm` 的 27 节点配额已满。当前保留 8 个训练节点（2377–2379、2418–2420、2437–2438）；采集使用 2392 和 2439 跑 05 no-guard、2333 跑 Pro Verified guarded，2401 跑 Qwen 审计。2439 的 V4.1 服务通过 `/v1/models`，18 题 worker 以并发 2 启动，两条轨迹已写入，8 卡 GPU 平均利用率采样约 98%。2391、2018、2284、2355 的低产出 guarded 分支已停止，以便训练作业取得节点。物理空闲节点在共享配额已满时不能视为可用节点。
+
+05 导出曾仅凭旧运行名称判断是否隔绝网络；近期 `isolation_fix` 和 `v41_verified_no_guard_recovery` 的 `cleanroom-overlay.json` 已记录 agent 与环境均为 `no-network`，却会被误列为公网轨迹。现改为读取每个运行的 overlay（缺失时仍按旧规则），并让新 05 run 进入导出扫描。断网证明只解决网络来源问题，每条 `reward=1` 仍要检查本地答案来源、修改测试文件和 verifier 覆盖。2392 首批 3 条终态有 2 条 `reward=1`，但两条均修改测试文件且答案访问风险未排除，不能计入 05 合格集，更不能计入 strict。
+
+HF 远端提交 `edcb50e2f00e82e83050ccbdf99441ffad9caf6c` 已确认：canonical strict 17、hybrid 149；05 全池通过旧版导出门槛的 trial 120 条、唯一任务 105 个。此提交早于上述导出修复；下一轮构建/提交需再次核对远端 revision。严格按完整 Nemotron 失败证据配对且 raw thinking 与 actions 均干净的唯一任务仍为 7 个。
