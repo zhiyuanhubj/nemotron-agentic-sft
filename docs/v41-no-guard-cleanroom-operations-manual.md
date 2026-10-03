@@ -156,3 +156,5 @@ part1 的 worker 被中断后，原 AgentCompass run id 已存在，直接以相
 恢复批次使用互斥任务清单、每节点 2 个 agent、一次正常 rollout 和有限的瞬态 API 重试。Pro Verified 的 39 个连接错误任务已分成两个恢复批次，另有 20 个未跑过的候选；ReBench 的 36 个配对验证失败任务分成两个恢复批次。另一个节点换机后需重新加载 V4.1 权重，服务就绪才自动启动 20 题 guarded 批次。先前 V4.1 `reward=1` 仅用于选题，原轨迹的 hacking 或 thinking 污染不会因重跑计划而变成合格数据；新轨迹仍须单独通过 verifier 和离线全轨迹审计。
 
 截至 14:45 UTC，严格按完整 Nemotron 失败证据配对的 clean 唯一任务为 **7**，宽口径 clean 为 **17**。报告应始终分开这两个分母。发布流程曾引用已经到期的计算分配，自动同步中断；改为现存分配后已重新开始全量构建，仍须检查上传完成日志和远端文件，再宣称 HF 已更新。
+
+后续进一步定位到登录节点的采集 supervisor 被 `systemd-oomd` 反复杀掉，导致其子进程中的审计、依赖代理和 HF publisher 一起中断；模型计算节点上的 Docker 服务与 rollout 不依赖该 supervisor 的进程生命周期。需查看 user service 的 `NRestarts` 和 journal，而不能只看 watcher 当前有 PID。已经给 supervisor 和独立 guard 服务设置 OOM 选择保护；长时间的 HF 导出应迁出 supervisor 单独运行，并在迁移后确认 Hub revision，避免“构建开始”被误报为“上传完成”。
