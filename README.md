@@ -223,6 +223,3 @@ Set `TEST_MODEL` to a local Nemotron model directory to include the native-token
 
 The portable launch and configuration paths are covered by CPU checks. A full GPU training run on each supported hardware topology is not part of these tests.
 
-## License
-
-Code is licensed under Apache-2.0. Automodel attribution is recorded in [NOTICE](NOTICE). Model and dataset licenses are determined by their respective sources.
