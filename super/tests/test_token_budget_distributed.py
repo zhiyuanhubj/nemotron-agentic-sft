@@ -1,8 +1,11 @@
 """Real Gloo DP2/CP2 accounting check without model weights or GPU allocation."""
 
+import json
+import socket
+import sys
 from pathlib import Path
 from types import SimpleNamespace
-import json, socket, sys
+
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -13,9 +16,7 @@ from token_budget import consume
 
 
 def rank_test(rank, port):
-    dist.init_process_group(
-        "gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=4
-    )
+    dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=4)
     dp_groups = [dist.new_group(x) for x in [[0, 2], [1, 3]]]
     cp_groups = [dist.new_group(x) for x in [[0, 1], [2, 3]]]
     group = dp_groups[rank % 2]
@@ -23,9 +24,7 @@ def rank_test(rank, port):
 
     class Recipe:
         def __init__(self):
-            self.step_scheduler = SimpleNamespace(
-                step=0, max_steps=100, sigterm_flag=False
-            )
+            self.step_scheduler = SimpleNamespace(step=0, max_steps=100, sigterm_flag=False)
 
         def _dp_allreduce(self, x):
             dist.all_reduce(x, group=group)
@@ -64,12 +63,10 @@ def rank_test(rank, port):
         inputs = torch.arange(6).reshape(2, 3)
         before_inputs = inputs.clone()
         before_labels = labels.clone()
-        data = consume(
-            recipe, [{"labels": labels, "input_ids": inputs}], original, 10, counter
+        data = consume(recipe, [{"labels": labels, "input_ids": inputs}], original, 10, counter)
+        assert torch.equal(inputs, before_inputs) and torch.equal(labels, before_labels), (
+            "Input dataset tensors mutated"
         )
-        assert torch.equal(inputs, before_inputs) and torch.equal(
-            labels, before_labels
-        ), "Input dataset tensors mutated"
         assert data.metrics["num_label_tokens"] == (8 if step == 0 else 2), (
             "CP replicas double-counted or final budget exceeded"
         )
@@ -82,10 +79,7 @@ def rank_test(rank, port):
         "optimizer_steps": 2,
         "input_tokens": 24,
     }
-    assert (
-        recipe.step_scheduler.max_steps == 2
-        and recipe.step_scheduler.sigterm_flag is False
-    )
+    assert recipe.step_scheduler.max_steps == 2 and recipe.step_scheduler.sigterm_flag is False
     # Neither an extra step nor a silently zeroed optimizer update is allowed.
     try:
         consume(

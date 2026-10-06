@@ -1,58 +1,33 @@
 # Nemotron-3.5-Super Agentic SFT
 
-本分支整理了截至 **2026-10-06** 本机最新的 Nemotron-3.5-Super **数据处理与全参数 SFT** 代码。默认配方来自当天已完成的 Opus 4.8 reviewed-123 训练：123 个任务各一条经审查的成功轨迹，128 个不与训练重叠的独立任务用于 teacher-loss 验证。训练通过 NeMo Automodel 的 Omni/VLM 模型入口运行，当前数据是文本、thinking 和工具调用。
+Data preparation and full-parameter supervised fine-tuning for Nemotron-3.5-Super using NVIDIA NeMo Automodel. The pipeline accepts text conversations with reasoning and tool calls, applies the model's native chat template, and trains on assistant targets only.
 
-代码沿用实际训练使用的原生模板、标签掩码、长轨迹窗口、数据集、早停、token 计数和 NVMe 检查点逻辑；本机路径、作业号、W&B 账号和凭据改为运行参数。模型权重、自定义模型/processor 文件、原始轨迹、审查记录、训练产物与密钥需要另外准备，不在 Git 仓库中。
+The training entry point supports a configurable number of nodes and GPUs through `torchrun`. Model, dataset, output, and checkpoint paths are supplied by the user. No cluster scheduler, pre-existing job allocations, benchmark metadata, or trajectory review service is required.
 
-原来的 Nemotron-3-Ultra LoRA 文档保存在 [docs/ultra-legacy-readme.md](docs/ultra-legacy-readme.md)，旧脚本和配置仍保留。3.5-Super 使用下面的 `super/` 入口。
+## Features
 
-## 最新配方
+- Messages JSONL input, including `reasoning_content`, tool calls, and tool observations.
+- Deterministic validation splits by task ID, or a separate validation file.
+- Native-template tokenization with assistant-only loss masking.
+- Rolling windows for long trajectories, with each original target supervised once.
+- Memory-mapped token arrays and a single causal label shift.
+- Full-parameter language-model and embedding training with FSDP2; configurable context and expert parallelism.
+- Validation loss, early stopping, assistant-token accounting, and resumable training state.
+- Standard filesystem checkpoints by default; optional node-local checkpoint storage.
 
-| 项目 | 默认设置 |
-| --- | --- |
-| 模型入口 | `NeMoAutoModelForImageTextToText` / `FinetuneRecipeForVLM` |
-| 优化范围 | 全参数语言模型与 embeddings；冻结 vision/audio tower |
-| 分布式 | 8 节点 × 8 GPU；FSDP2，CP=8，EP=64，TP=1 |
-| 序列长度 | 最多 131072 tokens；超过长度的轨迹拆成滚动窗口 |
-| Batch | global 32，local 1；`drop_last: false` |
-| Epoch | 最多 20；满足持续过拟合条件可提前停止 |
-| 优化器 | AdamW，LR `1e-5`，betas `[0.9, 0.95]`，weight decay `0.1` |
-| LR 调度 | cosine，warmup 10 steps，min LR `1e-6` |
-| 精度 | 已完成配方加载 BF16 参数；FP32 master 对照配方单独标为草案 |
-| 后端 | SDPA attention，torch linear / experts / dispatcher，FP32 RMSNorm |
-| MTP | loss scaling `0.1` |
-| 验证 / 保存 | 每 2 optimizer steps |
-| 检查点保留 | 各节点 NVMe 保留 latest 2 与 best 3 的并集；共享存储保留本 run 最佳的一个完整备份 |
+The vision and audio towers are frozen for this text/tool training recipe. No LoRA or other parameter-efficient adapter is configured.
 
-`super/configs/full_sft.yaml` 是最新 reviewed-123 配方；`v41_full_sft.yaml` 是上一版 V4.1 数据配方。`fp32_master_draft.yaml` 是 **尚未启动和验证的实验草案**：FP32 resident/master 参数、BF16 FSDP 计算、FP32 梯度归约。它需要独立 run 和实际 64-GPU 容量、更新及检查点验证，不能视为已完成训练的精度配置。
+## Requirements
 
-## 目录
+- Linux, NVIDIA GPUs, and a compatible CUDA/PyTorch environment.
+- Python 3.12 and the pinned Automodel checkout below, with this repository's compatibility patch.
+- A local model directory containing weights, the safetensors index, tokenizer/chat template, processor configuration, and any model-provided Python files.
+- Enough GPU memory for the model parameters, gradients, optimizer state, and activations across the selected devices. A configurable topology does not imply that a large model fits on one GPU.
+- For multi-node training: code, environment, model, prepared data, run state, and checkpoint storage available at the same absolute paths on each host, plus a reachable rendezvous address.
 
-```text
-super/
-  prepare_native.py           原生模板 tokenization 与 assistant 标签掩码
-  prepare_v41.py              V4.1 数据选择、独立验证集和滚动窗口
-  prepare_reviewed.py         最新已审查 Opus 成功轨迹处理
-  data_gate.py                文件哈希、数组结构、独立任务和源审查校验
-  agent_sft_data.py           memory-mapped NumPy 数据集与单次 causal shift
-  configure.py               生成独立运行配置；不启动训练
-  launch.py                  已有 Slurm allocations 的分发、启动及监控
-  run_training.py             数据检查与训练入口
-  nvme_checkpoint.py         节点分片保存与完整共享存储备份
-  verify_checkpoint.py       完整 64-rank 检查点只读校验
-  early_stopping.py          持续验证恶化且训练 loss 下降时早停
-  token_budget.py            全局 assistant target token 计数 / 可选精确预算
-  configs/                   三个训练配置模板
-  tests/                     CPU 数据处理及分布式 token 计数验证
-patches/nemotron35-super-automodel.patch
-                            实际 checkout 的 Super 兼容性补丁
-```
+The reference environment uses PyTorch `2.10.0+cu130` and CUDA 13.0. Supporting package versions are listed in [super/requirements-reference.txt](super/requirements-reference.txt). These are a compatibility reference; GPU dependencies should be installed through Automodel for your platform.
 
-源代码版本及 SHA256 记录在 [docs/super-code-provenance.json](docs/super-code-provenance.json)。发布版保留训练算法，调整运行路径、配置生成和启动入口；不包含原集群的其他实验备份移交、清理或评测调度操作。
-
-## 环境准备
-
-实际运行使用 Python 3.12、PyTorch `2.10.0+cu130`、CUDA toolkit 13.0，以及 Automodel commit `8cb12a35b65eda421d8f1fa485c658eb06d22c76`。其他关键包版本见 [super/requirements-observed.txt](super/requirements-observed.txt)。这份版本记录不替代 CUDA、EFA/NCCL、Mamba 等本机依赖的安装。
+## Installation
 
 ```bash
 git clone --branch nemotron-3.5-super-20261006 \
@@ -64,124 +39,190 @@ git -C third_party/Automodel checkout 8cb12a35b65eda421d8f1fa485c658eb06d22c76
 git -C third_party/Automodel apply --check ../../patches/nemotron35-super-automodel.patch
 git -C third_party/Automodel apply ../../patches/nemotron35-super-automodel.patch
 
-cd third_party/Automodel
-uv sync --extra vlm --extra cuda
-cd ../..
+(cd third_party/Automodel && uv sync --extra vlm --extra cuda)
 export AUTOMODEL="$PWD/third_party/Automodel"
 export TRAIN_PYTHON="$AUTOMODEL/.venv/bin/python"
 ```
 
-依赖安装结果应与上述已观测版本核对，尤其是 PyTorch/CUDA；`uv sync` 在其他机器上不保证选择相同的 GPU wheel。补丁包括 Super 架构注册、RADIO 权重映射、FSDP2/MTP 的 Tensor/DTensor 兼容处理，以及离线 consolidation timeout 参数。
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if it is not already available. Verify the resolved PyTorch wheel and CUDA runtime before training. The patch adds Super architecture support, RADIO weight mappings, FSDP2/MTP tensor compatibility, and a checkpoint consolidation timeout option.
 
-模型目录必须包含完整 safetensors shards、index、tokenizer/chat template、processor/config 和模型自带的 remote-code 文件。代码通过 `trust_remote_code=True`、`local_files_only=True` 加载已在本地准备好的模型。
+Model weights and model-provided remote code are not bundled with this repository. Both preprocessing and training use a local model directory. Preprocessing requires a fast tokenizer with character offsets.
 
-Slurm 启动依赖共享代码/数据存储、各节点 NVMe、`srun`、`rsync`、`nvidia-smi` 和 `ip`。集群需要为每节点提供 8 张 GPU。默认每节点 96 CPU、1500G 内存、NVMe 可用空间大于 1 TiB；启动参数可调整资源请求，模型实际容量需求需另行满足。
+## Input data
 
-## 数据处理
+Each line is a conversation with a nonempty string `task_id` and a `messages` array:
 
-原生模板完整渲染后一次 tokenize，并验证 token 序列与 `apply_chat_template(tokenize=True)` 完全相同。通过字符 offsets 决定标签，避免分段 tokenize 改变 BPE 边界。
-
-- system、user、tool observation、assistant header、opening/empty think 均设为 `-100`。
-- 原始 provider 返回的 thinking、assistant 内容、工具调用和 `<|im_end|>` 是训练目标。
-- 工具 arguments 的 JSON 字符串转回字典；harness 的 `exit` 消息不进入训练。
-- 超过 128K 的轨迹保留最初 system/task prefix 和最多 16K 最近上下文，优先按 assistant 轮次切割；超长单轮按 token 边界切割。
-- 复用上下文标签全部屏蔽；每个原始 target token 在所有窗口中恰好训练一次。
-- NumPy 数据在存储时不做 shift；collator 用 `input_ids[:, :-1]`、`labels[:, 1:]` 做一次 causal shift。
-
-### 最新 reviewed-123 流程
-
-需要本地 accepted manifest、当前审查目录、collection protocol、完整 result/task 文件，以及独立验证参考轨迹和 benchmark metadata。路径可以来自现有本机目录，原始内容不需要上传到 GitHub。
-
-```bash
-export NEMOTRON_MODEL=/shared/models/nemotron35super
-export BENCHMARK_JSONL=/shared/benchmark/swebench_pro_verified.jsonl
-export REFERENCE_JSONL=/shared/reference/resolved_once_per_task.jsonl.gz
-export PREPARED_DIR=/shared/data/opus48_reviewed123_prepared
-
-"$TRAIN_PYTHON" super/prepare_reviewed.py \
-  --accepted-manifest /shared/reviews/accepted.json \
-  --integrity-audit /shared/reviews/integrity_audit \
-  --collection-protocol /shared/reviews/collection_protocol.json \
-  --expected-tasks 123 --validation-tasks 128
+```json
+{"task_id":"task-001","messages":[{"role":"system","content":"You are a helpful coding assistant."},{"role":"user","content":"Explain what git status does."},{"role":"assistant","reasoning_content":"The user needs a brief description of working-tree state.","content":"git status shows staged, unstaged, and untracked changes."}]}
 ```
 
-Accepted manifest 的外层包含 `review_complete: true` 和 `accepted` 列表；每条记录包含 `task_id`、`source`（result.json 绝对路径）、`source_sha256`、`attempt`、`integrity_status: accepted`。Collection protocol 包含 `groups`，每组的 `manifest` 指向带有 `run_id` 和可选 `own_patch_repair` 的采集说明文件。result/task 文件保留原采集目录结构，用于任务身份和采集条件匹配。
+An initial system message is optional. Supported roles are `system`, `user`, `assistant`, and `tool`. Message content is text. Assistant messages may include `reasoning_content` and OpenAI-style `tool_calls`; tool messages may include `tool_call_id` and `name`. Function arguments can be dictionaries or JSON-encoded strings. Harness `exit` messages are ignored.
 
-处理器核对源 SHA256、当前 held source、任务身份、官方 completed/resolved 和全部 fail-to-pass/pass-to-pass 测试通过；保留真正返回的 thinking。默认每任务一条已审查轨迹，训练集为 `augmented/`；验证集 `monitor/` 按 benchmark 语言比例确定性采样，排除全部训练任务。输出 `input_ids.npy`、`labels.npy`、`offsets.npy`、每窗口 manifest、原始 messages JSONL、`summary.json` 和 `READY.json`。
+Use the same task ID for every trajectory belonging to the same underlying task. Automatic splitting keeps all trajectories for a task in one split. Explicit validation input must have no task IDs or identical conversations in common with training input. Exact duplicate conversations are rejected.
 
-独立任务 teacher loss 用于训练监控，不是 agent benchmark pass rate。若以后在训练任务所属的 benchmark 上评测，需要记录训练/测试任务重叠。
+Small format examples are provided in [examples/train.jsonl](examples/train.jsonl) and [examples/validation.jsonl](examples/validation.jsonl). They illustrate the schema and are not a training dataset.
 
-### V4.1 数据流程
+## Prepare the dataset
 
 ```bash
-export SOURCE_ROOT=/shared/v41-export
-export PREPARED_DIR=/shared/data/v41_prepared
-# NEMOTRON_MODEL、BENCHMARK_JSONL、REFERENCE_JSONL 同上
-"$TRAIN_PYTHON" super/prepare_v41.py
+export MODEL_DIR=/path/to/nemotron-model
+export PREPARED_DIR="$PWD/prepared/my_dataset"
+
+"$TRAIN_PYTHON" super/prepare_data.py \
+  --model "$MODEL_DIR" \
+  --train /path/to/train.jsonl \
+  --validation /path/to/validation.jsonl \
+  --output "$PREPARED_DIR" \
+  --max-length 8192
 ```
 
-`SOURCE_ROOT/data/` 下读取 `01_clean_thinking_and_actions`、`02_clean_actions_dirty_thinking_removed`、`05_swe_rebench_v2` 和 `05_swebench_pro_verified` 四组导出文件。按动作去重，每任务最多两条不同动作轨迹，适量减少 JS 的第二次尝试，保留所有任务；独立验证默认 128 个任务。输出 split 为 `train/` 与 `validation/`，训练时选择 `v41_full_sft.yaml`。
+Omit `--validation` to select a deterministic held-out fraction of tasks using `--validation-fraction` (default `0.1`) and `--seed` (default `42`). Automatic splitting requires at least two tasks. Plain JSONL and gzip-compressed JSONL are supported. Use a new or empty output directory.
 
-## 配置、分发和训练
+The processor renders the complete native template and tokenizes it once, checking equality with `apply_chat_template(tokenize=True)`. System/user text, tool observations, assistant headers, and opening or empty reasoning tags are masked with `-100`. Assistant reasoning, responses, tool calls, and end-of-message tokens remain targets.
 
-先生成独立 run。默认不开启 W&B；如需启用，设置 `WANDB_ENTITY` 和 `WANDB_API_KEY`，或 `WANDB_KEY_FILE`（共享存储上的私有凭据文件）。不在配置中写入密钥。
+Overlength trajectories are split into rolling windows. Windows preserve the initial task prefix and recent context, prefer assistant-round boundaries, and fall back to token boundaries for oversized rounds. Repeated context is masked. A task prefix occupying half the configured window or more is rejected; increase `--max-length` for that input. `--context-tokens` controls the recent-context budget, which is capped further to reserve room for new targets.
+
+Output:
+
+```text
+prepared/my_dataset/
+  train/                  input_ids.npy, labels.npy, offsets.npy, manifest.jsonl
+  validation/             input_ids.npy, labels.npy, offsets.npy, manifest.jsonl
+  summary.json            source hashes, split statistics, preprocessing settings
+  READY.json              verified dataset marker
+```
+
+Arrays are stored without a label shift. The collator applies `input_ids[:, :-1]` and `labels[:, 1:]` once and masks padding. Data verification checks hashes, array structure, target counts, and task separation before training. Tokenization assets are fingerprinted by content, so prepared data can be moved to another machine using an identical tokenizer.
+
+## Configure training
+
+The baseline in [super/configs/full_sft.yaml](super/configs/full_sft.yaml) uses BF16 weights, FSDP2, activation checkpointing, AdamW, a cosine schedule, and three epochs. Context and expert parallelism default to one. Hyperparameters are editable in the template before generating a run configuration.
+
+This example uses one host with four GPUs; replace the worker count and parallelism settings with values appropriate for your hardware:
 
 ```bash
-export RUN_DIR=/shared/runs/nemotron35super_opus123
+export RUN_DIR="$PWD/runs/my_sft"
 
 "$TRAIN_PYTHON" super/configure.py \
-  --config super/configs/full_sft.yaml \
-  --run-name opus123 \
-  --run-dir "$RUN_DIR" \
+  --model "$MODEL_DIR" \
   --prepared-dir "$PREPARED_DIR" \
-  --model "$NEMOTRON_MODEL" \
-  --accepted-manifest /shared/reviews/accepted.json \
-  --integrity-audit /shared/reviews/integrity_audit
-
-# 以下是占位 job IDs；替换为自己的 8 个以上已有单节点 allocations。
-"$TRAIN_PYTHON" super/launch.py \
-  --run-dir "$RUN_DIR" --automodel "$AUTOMODEL" \
-  --jobs 1001,1002,1003,1004,1005,1006,1007,1008 \
-  --wait
+  --run-dir "$RUN_DIR" \
+  --run-name my_sft \
+  --nnodes 1 --nproc-per-node 4 \
+  --cp-size 1 --ep-size 1 \
+  --global-batch-size 8 --local-batch-size 1 \
+  --epochs 3 --learning-rate 1e-5
 ```
 
-启动器从给定 allocations 中选择剩余时间最长的 8 个空闲节点，检查显存和 NVMe，分发模型/数据并再次检查 GPU，然后每节点启动 8 个 torchrun workers。默认网络匹配 `10.1.`，可用 `--subnet` 修改；CUDA、NCCL/EFA library 路径需要在启动环境中正确配置，AWS EFA 集群可设置 `FI_PROVIDER=efa`。日志在 `$RUN_DIR/logs/rank*.log`，运行状态在 `$RUN_DIR/state/status.json`。
+There is no fixed node count or GPU count per node. Use `--nproc-per-node 1` for a single GPU when the model and training state fit. Increase the number of devices or adjust sequence length and parallelism for larger workloads.
 
-启动失败会停止本次 launcher 创建的 workers。它不取消其他 allocations，不清理已有服务；已有 launch 状态必须先检查再恢复。默认 fresh launch 要求该 run 的节点检查点目录为空。
+`cp_size` and `ep_size` must divide the total worker count; expert parallelism must also divide the model's routed-expert count. With tensor and pipeline parallelism fixed at one, data parallel size is `world_size / cp_size`. Global batch size must be a multiple of `local_batch_size * dp_size`; the remaining factor sets gradient accumulation. The configuration generator validates these constraints.
 
-也可由自己的调度脚本直接调用训练入口；每节点使用相同配置和 `super/` 模块路径：
+The collator's sequence limit is taken from the prepared dataset unless `--max-length` specifies a larger value. To lower it, reprocess the dataset so supervised tokens are preserved.
+
+By default, checkpoints are written to `RUN_DIR/checkpoints`, and W&B logging is disabled. Override the checkpoint path with `--checkpoint-dir`. Enable W&B with `--wandb` and authenticate through your usual W&B environment or login; `WANDB_KEY_FILE` is also supported. Credentials are never embedded in generated YAML.
+
+## Launch training
 
 ```bash
-export PYTHONPATH="$PWD/super:$AUTOMODEL:${PYTHONPATH:-}"
-"$TRAIN_PYTHON" -m torch.distributed.run \
-  --nnodes=8 --nproc-per-node=8 --node-rank="$NODE_RANK" \
-  --master-addr="$MASTER_ADDR" --master-port=29676 \
-  "$PWD/super/run_training.py" "$RUN_DIR/train.yaml"
+# Validate the configuration and inspect the torchrun command.
+"$TRAIN_PYTHON" super/launch.py \
+  --run-dir "$RUN_DIR" --automodel "$AUTOMODEL" --dry-run
+
+# Start training on the current host.
+"$TRAIN_PYTHON" super/launch.py \
+  --run-dir "$RUN_DIR" --automodel "$AUTOMODEL"
 ```
 
-直接启动前须按 `state/READY` 中的 `local_model`、`local_data` 路径在每个节点完成分发。精确 token-budget 模式可以在模板中设置 `mode: exact`、`supervised_tokens: 整数`；最新完成配方使用 `track_only`，仅记录实际 optimizer 输入 target tokens，包括 sampler 重复。计数通过 DP group 汇总，不重复计算 CP replicas。
+The launcher uses the Python interpreter that runs it and waits for `torchrun` to finish. Logs stream to the terminal; redirect them or use your scheduler's log capture if needed. Per-host startup records and training monitor state are saved under `RUN_DIR/state`.
 
-## 保存与恢复
+### Multiple hosts
 
-保存模型、optimizer、RNG、dataloader 和 scheduler 状态。节点 coordinator 写入本地 NVMe；需要更新最佳共享备份时，收集全部节点分片，验证 safetensors headers、optimizer storage ranges、rank state 数量、文件尺寸和小文件 SHA256。完整备份发布 `COMPLETE.json` 和 `BEST` 指针后，才清理本 run 的旧完整备份。
+Generate the configuration with your chosen `--nnodes` and `--nproc-per-node`. Run the launcher once on each allocated host, using a unique zero-based node rank and the same master address and port:
+
+```bash
+# Set NODE_RANK separately on each host: 0, 1, ..., nnodes - 1.
+export NODE_RANK=0
+export MASTER_ADDR=training-host-0
+export MASTER_PORT=29500
+
+"$TRAIN_PYTHON" super/launch.py \
+  --run-dir "$RUN_DIR" --automodel "$AUTOMODEL" \
+  --node-rank "$NODE_RANK" \
+  --master-addr "$MASTER_ADDR" --master-port "$MASTER_PORT"
+```
+
+Your scheduler allocates resources and starts one launcher per host. The launcher does not select nodes or inspect allocation lifetimes. Configure NCCL interfaces and transport libraries through the environment for your network.
+
+## Checkpoints and resume
+
+Automodel saves the model, optimizer, learning-rate scheduler, RNG, dataloader, and step scheduler. The additional hooks save early-stopping history and token accounting alongside each synchronous checkpoint. Default retention keeps two recent checkpoints and checkpoints referenced by Automodel's latest/best pointers.
+
+To resume, stop the previous workers, archive `RUN_DIR/train.yaml`, and regenerate the configuration with `--restore-from` pointing to a completed checkpoint in the same checkpoint directory. Reuse the original model, data, node/worker counts, context/expert parallelism, batch sizes, and hook settings:
+
+```bash
+mv "$RUN_DIR/train.yaml" "$RUN_DIR/train.previous.yaml"
+
+"$TRAIN_PYTHON" super/configure.py \
+  --model "$MODEL_DIR" --prepared-dir "$PREPARED_DIR" \
+  --run-dir "$RUN_DIR" --run-name my_sft \
+  --nnodes 1 --nproc-per-node 4 --cp-size 1 --ep-size 1 \
+  --global-batch-size 8 --local-batch-size 1 \
+  --epochs 3 --learning-rate 1e-5 \
+  --restore-from "$RUN_DIR/checkpoints/epoch_0_step_100"
+```
+
+Then launch with the same commands as above. Model weights alone are insufficient for full-state resume. Resume is limited to the original topology and data; changing those requires a new run.
+
+Early stopping uses sustained validation-loss degradation together with improving training loss. The monitor state is restored on resume. Validation loss measures prediction on held-out trajectories; evaluate agent task success separately.
+
+Token accounting defaults to `track_only` and counts actual assistant targets consumed by optimizer updates, including sampler repetitions. Context-parallel replicas are not counted twice. Set `token_budget.mode: exact` and `token_budget.supervised_tokens` in the template to stop at an exact target-token budget. Set `enabled: false` to disable accounting.
+
+### Optional node-local storage
+
+For installations with node-local disks and shared backup storage, `configure.py --nvme-root /path/to/local/storage` enables the optional node-local checkpoint hook. Stage the model and prepared data on **every** host at the `local_model` and `local_data` paths recorded in `RUN_DIR/state/READY` before launching. The code does not automatically copy these inputs or require NVMe in the default workflow.
+
+Each host retains the union of its latest two and best three shard sets. A better checkpoint is assembled and verified in the shared checkpoint directory before the previous complete backup is removed. This mode requires `rsync` and sufficient local/shared disk capacity. Verify a backup with:
 
 ```bash
 "$TRAIN_PYTHON" super/verify_checkpoint.py "$RUN_DIR/checkpoints/BEST"
 ```
 
-恢复只接受本 run 共享存储下已验证的完整 checkpoint。用 `configure.py --restore-from /shared/runs/同一run/checkpoints/epoch_N_step_M` 生成恢复配置（先归档原 `train.yaml`），再由自己的 Slurm 调度脚本直接调用 `run_training.py`。当前 `launch.py` 是 fresh-run launcher，已有节点状态恢复不自动重排。节点拓扑仍要求 8×8；恢复模型、optimizer、scheduler、RNG、dataloader 和 token-budget 计数。早停 hook 会保存历史，但当前实现重启时重新初始化 monitor；恢复时需考虑这一限制。
+## Repository layout
 
-## 验证
+```text
+examples/                   minimal messages JSONL examples
+super/
+  prepare_data.py           public data-preparation CLI
+  prepare_native.py         native-template tokenization and masking
+  rolling_windows.py        long-trajectory segmentation
+  agent_sft_data.py          memory-mapped dataset and collator
+  data_gate.py              dataset integrity verification
+  configure.py              resolved configuration generation
+  topology.py               parallelism and batch validation
+  launch.py                 single-host and multi-host torchrun launcher
+  run_training.py           training entry point
+  checkpoint_state.py       checkpoint persistence for optional hooks
+  early_stopping.py         validation monitor
+  token_budget.py           assistant-target accounting and exact budgets
+  nvme_checkpoint.py        optional node-local checkpoint backup
+  verify_checkpoint.py      node-local backup verification
+  configs/full_sft.yaml      editable full-parameter SFT baseline
+  tests/                    CPU pipeline and distributed-accounting checks
+patches/                    pinned Automodel compatibility patch
+```
+
+## Verification
 
 ```bash
-# TEST_MODEL 设为真实本地模型 tokenizer 时，额外运行原生模板测试。
-TEST_MODEL="$NEMOTRON_MODEL" "$TRAIN_PYTHON" -m unittest discover \
-  -s super/tests -p test_pipeline.py -v
+"$TRAIN_PYTHON" -m unittest discover -s super/tests -p 'test_*.py' -v
 "$TRAIN_PYTHON" super/tests/test_token_budget_distributed.py
 ```
 
-测试覆盖原生工具参数与 assistant 掩码、超长单轮窗口的目标守恒、单次 shift 与 padding、数据修改拒绝、完整检查点缺 rank state 拒绝、早停，以及实际 4 个 CPU/Gloo ranks 上的 DP2/CP2 token-budget 计数。新发布的可配置启动器尚未在新的 64-GPU 作业上重新跑完整训练。
+Set `TEST_MODEL` to a local Nemotron model directory to include the native-tokenizer integration test. Other pipeline tests run on CPU without model weights. The distributed check uses four CPU/Gloo workers to verify DP/CP accounting and exact-budget termination.
+
+The portable launch and configuration paths are covered by CPU checks. A full GPU training run on each supported hardware topology is not part of these tests.
 
 ## License
 
-沿用仓库 Apache-2.0；Automodel 补丁和配置来源见 `NOTICE`。模型和训练数据的访问及许可由各自来源决定。
+Code is licensed under Apache-2.0. Automodel attribution is recorded in [NOTICE](NOTICE). Model and dataset licenses are determined by their respective sources.

@@ -1,50 +1,38 @@
-"""Exercise production token boundaries, rolling targets and data freeze gates."""
+"""Exercise token boundaries, rolling targets, data integrity and checkpoint topology."""
 
 import json
 import os
-from pathlib import Path
 import pickle
 import sys
 import tempfile
-from types import SimpleNamespace
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-os.environ.setdefault("NEMOTRON_MODEL", "unused-by-synthetic-tests")
-os.environ.setdefault("REFERENCE_JSONL", "unused")
-os.environ.setdefault("BENCHMARK_JSONL", "unused")
 import data_gate
 from agent_sft_data import PretokenizedDataset, collate_fn
 from early_stopping import OverfitMonitor
-from prepare_v41 import windows
+from rolling_windows import windows
 from verify_checkpoint import verify_complete
 
 
 class PipelineTests(unittest.TestCase):
     def test_rolling_targets_once_with_oversized_round(self):
-        import prepare_v41 as pipeline
-
-        original = pipeline.MAX_LENGTH
-        pipeline.MAX_LENGTH = 24
-        try:
-            ids = np.arange(95, dtype=np.int32)
-            labels = ids.copy()
-            labels[:5] = -100
-            labels[::7] = -100
-            parts = windows(ids, labels, [5, 12, 21, 70, 90])
-            observed = np.concatenate([lab[lab != -100] for _, lab, _ in parts])
-            np.testing.assert_array_equal(observed, labels[labels != -100])
-            self.assertTrue(all(len(tokens) <= 24 for tokens, _, _ in parts))
-            self.assertTrue(
-                any(layout["partial_round_boundary"] for _, _, layout in parts)
-            )
-            for tokens, _, _ in parts:
-                np.testing.assert_array_equal(tokens[:5], ids[:5])
-        finally:
-            pipeline.MAX_LENGTH = original
+        ids = np.arange(95, dtype=np.int32)
+        labels = ids.copy()
+        labels[:5] = -100
+        labels[::7] = -100
+        parts = windows(ids, labels, [5, 12, 21, 70, 90], max_length=24)
+        observed = np.concatenate([lab[lab != -100] for _, lab, _ in parts])
+        np.testing.assert_array_equal(observed, labels[labels != -100])
+        self.assertTrue(all(len(tokens) <= 24 for tokens, _, _ in parts))
+        self.assertTrue(any(layout["partial_round_boundary"] for _, _, layout in parts))
+        for tokens, _, _ in parts:
+            np.testing.assert_array_equal(tokens[:5], ids[:5])
 
     def test_collation_shifts_once_and_masks_padding(self):
         examples = [
@@ -65,8 +53,8 @@ class PipelineTests(unittest.TestCase):
         model = os.environ.get("TEST_MODEL")
         if not model:
             self.skipTest("Set TEST_MODEL to the local Nemotron tokenizer")
-        from transformers import AutoTokenizer
         from prepare_native import normalize, tokenize
+        from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(
             model, trust_remote_code=True, local_files_only=True
@@ -106,9 +94,7 @@ class PipelineTests(unittest.TestCase):
                 }
             }
         )
-        self.assertIsInstance(
-            messages[2]["tool_calls"][0]["function"]["arguments"], dict
-        )
+        self.assertIsInstance(messages[2]["tool_calls"][0]["function"]["arguments"], dict)
         ids, labels = tokenize(messages, tokenizer)
         targets = tokenizer.decode(ids[labels != -100].tolist())
         for sentinel in [
@@ -129,12 +115,8 @@ class PipelineTests(unittest.TestCase):
             for split, task in [("train", "a"), ("validation", "b")]:
                 directory = root / split
                 directory.mkdir()
-                np.save(
-                    directory / "input_ids.npy", np.array([1, 2, 3], dtype=np.uint32)
-                )
-                np.save(
-                    directory / "labels.npy", np.array([-100, 2, 3], dtype=np.int32)
-                )
+                np.save(directory / "input_ids.npy", np.array([1, 2, 3], dtype=np.uint32))
+                np.save(directory / "labels.npy", np.array([-100, 2, 3], dtype=np.int32))
                 np.save(directory / "offsets.npy", np.array([0, 3], dtype=np.int64))
                 (directory / "manifest.jsonl").write_text(
                     json.dumps({"task": task, "tokens": 3, "target_tokens": 2}) + "\n"
@@ -156,7 +138,7 @@ class PipelineTests(unittest.TestCase):
             path = Path(temporary) / "epoch_0_step_2"
             for component in ["model", "optim", "rng", "dataloader"]:
                 (path / component).mkdir(parents=True, exist_ok=True)
-            for rank in range(64):
+            for rank in range(4):
                 save_file(
                     {"weight": torch.tensor([rank], dtype=torch.float32)},
                     path / "model" / f"{rank}.safetensors",
@@ -168,9 +150,7 @@ class PipelineTests(unittest.TestCase):
                 ]:
                     (path / component / f"{rank}.{suffix}").write_bytes(b"test")
             metadata = SimpleNamespace(
-                storage_data={
-                    "key": SimpleNamespace(relative_path="0.distcp", offset=0, length=4)
-                }
+                storage_data={"key": SimpleNamespace(relative_path="0.distcp", offset=0, length=4)}
             )
             (path / "optim/.metadata").write_bytes(pickle.dumps(metadata))
             for name in ["config.yaml", "losses.json", "step_scheduler.pt"]:
@@ -186,14 +166,14 @@ class PipelineTests(unittest.TestCase):
             (path / "COMPLETE.json").write_text(
                 json.dumps(
                     {
-                        "world_size": 64,
-                        "nodes": 8,
-                        "node_manifests": {str(i): manifest for i in range(8)},
+                        "world_size": 4,
+                        "nodes": 2,
+                        "node_manifests": {str(i): manifest for i in range(2)},
                     }
                 )
             )
             verify_complete(path)
-            (path / "rng/63.pt").unlink()
+            (path / "rng/3.pt").unlink()
             with self.assertRaises((AssertionError, FileNotFoundError)):
                 verify_complete(path)
 

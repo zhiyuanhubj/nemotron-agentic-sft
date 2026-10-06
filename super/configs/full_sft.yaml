@@ -1,11 +1,12 @@
+# Editable baseline for full-parameter text/tool SFT. Configure topology for your hardware.
 recipe: FinetuneRecipeForVLM
-seed: 1111
+seed: 42
 step_scheduler:
-  num_epochs: 20
-  global_batch_size: 32
+  num_epochs: 3
+  global_batch_size: 8
   local_batch_size: 1
-  ckpt_every_steps: 2
-  val_every_steps: 2
+  ckpt_every_steps: 100
+  val_every_steps: 100
   log_remote_every_steps: 1
   gc_every_steps: 5
 dist_env:
@@ -13,7 +14,7 @@ dist_env:
   timeout_minutes: 120
 rng:
   _target_: nemo_automodel.components.training.rng.StatefulRNG
-  seed: 1111
+  seed: 42
   ranked: true
 model:
   _target_: nemo_automodel.NeMoAutoModelForImageTextToText.from_pretrained
@@ -49,17 +50,14 @@ checkpoint:
   is_async: false
 distributed:
   strategy: fsdp2
-  dp_size: none
+  dp_size: null
   tp_size: 1
-  cp_size: 8
+  cp_size: 1
   pp_size: 1
-  ep_size: 64
+  ep_size: 1
   sequence_parallel: false
   activation_checkpointing: true
   defer_fsdp_grad_sync: false
-  moe:
-    reshard_after_forward: true
-    wrap_outer_model: true
 freeze_config:
   freeze_embeddings: false
   freeze_vision_tower: true
@@ -70,7 +68,7 @@ loss_fn:
   fp32_upcast: false
 dataset:
   _target_: agent_sft_data.PretokenizedDatasetConfig
-  path: ${LOCAL_DATA}/augmented
+  path: ${LOCAL_DATA}/train
 dataloader:
   _target_: torchdata.stateful_dataloader.StatefulDataLoader
   num_workers: 0
@@ -78,10 +76,10 @@ dataloader:
   drop_last: false
   collate_fn:
     _target_: agent_sft_data.collate_fn
-    max_length: 131072
+    max_length: 8192
 validation_dataset:
   _target_: agent_sft_data.PretokenizedDatasetConfig
-  path: ${LOCAL_DATA}/monitor
+  path: ${LOCAL_DATA}/validation
 validation_dataloader:
   _target_: torchdata.stateful_dataloader.StatefulDataLoader
   num_workers: 0
@@ -89,7 +87,7 @@ validation_dataloader:
   drop_last: false
   collate_fn:
     _target_: agent_sft_data.collate_fn
-    max_length: 131072
+    max_length: 8192
 optimizer:
   _target_: torch.optim.AdamW
   betas:
@@ -119,8 +117,6 @@ early_stopping:
   train_loss_drop: 0.05
   train_window: 10
 prepared_data_gate: ${LOCAL_DATA}/READY.json
-accepted_manifest: ${ACCEPTED_MANIFEST}
-integrity_audit: ${INTEGRITY_AUDIT}
 token_budget:
   enabled: true
   mode: track_only

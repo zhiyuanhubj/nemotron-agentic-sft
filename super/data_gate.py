@@ -1,4 +1,4 @@
-"""Freeze and verify prepared arrays and their source manifest before training."""
+"""Hash and verify prepared arrays, token counts and task-disjoint splits."""
 
 import hashlib
 import json
@@ -15,7 +15,25 @@ def digest(path):
     return value.hexdigest()
 
 
-def publish_ready(directory, stats, accepted_manifest=None):
+def tokenizer_fingerprint(directory):
+    """Identify local tokenization assets independently of their filesystem path."""
+    directory = Path(directory)
+    names = [
+        "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "chat_template.jinja",
+        "tokenizer.model",
+        "vocab.json",
+        "merges.txt",
+    ]
+    files = [directory / name for name in names if (directory / name).is_file()]
+    files.extend(sorted(directory.glob("chat_templates/*.jinja")))
+    return {str(path.relative_to(directory)): digest(path) for path in files}
+
+
+def publish_ready(directory, stats):
     directory = Path(directory)
     stats["ready_for_training"] = True
     stats["files_sha256"] = {
@@ -23,17 +41,13 @@ def publish_ready(directory, stats, accepted_manifest=None):
         for p in sorted(directory.rglob("*"))
         if p.is_file() and p.name not in {"summary.json", "READY.json"}
     }
-    if accepted_manifest:
-        stats["accepted_manifest_sha256"] = digest(accepted_manifest)
     summary = directory / "summary.json"
     summary.write_text(json.dumps(stats, ensure_ascii=False, indent=2) + "\n")
     ready = {"ready_for_training": True, "summary_sha256": digest(summary)}
-    if accepted_manifest:
-        ready["accepted_manifest_sha256"] = digest(accepted_manifest)
     (directory / "READY.json").write_text(json.dumps(ready, indent=2) + "\n")
 
 
-def verify(directory, accepted_manifest=None, audit_directory=None, verify_hashes=True):
+def verify(directory, verify_hashes=True):
     directory = Path(directory).resolve()
     ready = json.loads((directory / "READY.json").read_text())
     assert ready["ready_for_training"] is True
@@ -45,20 +59,6 @@ def verify(directory, accepted_manifest=None, audit_directory=None, verify_hashe
             file = directory / relative
             assert file.resolve().is_relative_to(directory), relative
             assert digest(file) == sha, relative
-    if accepted_manifest:
-        from integrity_holds import held_source_hashes
-
-        accepted = json.loads(Path(accepted_manifest).read_text())
-        assert accepted["review_complete"] is True and accepted["accepted"]
-        assert ready["accepted_manifest_sha256"] == digest(accepted_manifest)
-        assert len({x["task_id"] for x in accepted["accepted"]}) == len(
-            accepted["accepted"]
-        )
-        held = held_source_hashes(Path(audit_directory)) if audit_directory else set()
-        for row in accepted["accepted"]:
-            assert row["integrity_status"] == "accepted"
-            assert row["source_sha256"] not in held
-            assert digest(row["source"]) == row["source_sha256"]
     tasks = []
     for split, info in summary["splits"].items():
         entries = [
@@ -71,13 +71,21 @@ def verify(directory, accepted_manifest=None, audit_directory=None, verify_hashe
         assert len(entries) == info["rows"] and offsets.shape == (len(entries) + 1,)
         assert int(offsets[0]) == 0 and np.all(np.diff(offsets) > 0)
         assert ids.ndim == labels.ndim == 1
+        assert ids.dtype == np.uint32 and labels.dtype == np.int32
+        assert offsets.dtype == np.int64
         assert len(ids) == len(labels) == int(offsets[-1]) == info["tokens"]
         assert all(
-            int(offsets[i + 1] - offsets[i]) == row["tokens"]
-            for i, row in enumerate(entries)
+            int(offsets[i + 1] - offsets[i]) == row["tokens"] for i, row in enumerate(entries)
         )
         assert all(row["tokens"] <= summary["max_length"] for row in entries)
         assert sum(row["target_tokens"] for row in entries) == info["target_tokens"] > 0
+        for i, row in enumerate(entries):
+            start, end = map(int, offsets[i : i + 2])
+            target = labels[start:end]
+            assert target[0] == -100, "First token has no causal context"
+            mask = target != -100
+            assert int(mask.sum()) == row["target_tokens"] > 0
+            assert np.all(target[mask] == ids[start:end][mask])
         tasks.append({row["task"] for row in entries})
     assert len(tasks) == 2 and not tasks[0].intersection(tasks[1]), (
         "Validation tasks must be independent"
@@ -90,12 +98,10 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("prepared_dir", type=Path)
-    parser.add_argument("--accepted-manifest", type=Path)
-    parser.add_argument("--integrity-audit", type=Path)
     args = parser.parse_args()
     print(
         json.dumps(
-            verify(args.prepared_dir, args.accepted_manifest, args.integrity_audit),
+            verify(args.prepared_dir),
             indent=2,
         )
     )

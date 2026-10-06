@@ -1,7 +1,7 @@
-"""Run-scoped local NVMe checkpointing with verified atomic FSx publication.
+"""Run-scoped local NVMe checkpointing with verified atomic shared-storage publication.
 
 Every node retains the union of the latest two and best three local shard sets.
-FSx retains one best complete global checkpoint; its predecessor is deleted only
+shared storage retains one best complete global checkpoint; its predecessor is deleted only
 after a newly better set has been verified.
 An incomplete copy is never advertised as resumable. No Hub uploads are made.
 """
@@ -22,7 +22,7 @@ import torch.distributed as dist
 
 RUN = Path(os.environ["RUN_DIR"]).resolve()
 LOCAL = Path(os.environ["LOCAL_CKPT_DIR"]).resolve()
-BACKUP = RUN / "checkpoints"
+BACKUP = Path(os.environ.get("BACKUP_CKPT_DIR", str(RUN / "checkpoints"))).resolve()
 
 
 def collective_step(fn, enabled=True):
@@ -59,11 +59,7 @@ def validation_score(path):
 
 def retention_selection(root):
     candidates = sorted(
-        [
-            p
-            for p in root.glob("epoch_*_step_*")
-            if p.is_dir() and not (p / ".incomplete").exists()
-        ],
+        [p for p in root.glob("epoch_*_step_*") if p.is_dir() and not (p / ".incomplete").exists()],
         key=checkpoint_order,
     )
     best = sorted(
@@ -124,13 +120,9 @@ def copy_node(source, destination):
         info = {"bytes": file.stat().st_size}
         if info["bytes"] < 16 * 1024 * 1024:
             info["sha256"] = hashlib.sha256(file.read_bytes()).hexdigest()
-            assert info["sha256"] == hashlib.sha256(copied.read_bytes()).hexdigest(), (
-                rel
-            )
+            assert info["sha256"] == hashlib.sha256(copied.read_bytes()).hexdigest(), rel
         manifest[rel] = info
-    (destination / "NODE_MANIFEST.json").write_text(
-        json.dumps(manifest, sort_keys=True)
-    )
+    (destination / "NODE_MANIFEST.json").write_text(json.dumps(manifest, sort_keys=True))
 
 
 def assemble_and_verify(incoming, name, world_size, nodes):
@@ -144,22 +136,16 @@ def assemble_and_verify(incoming, name, world_size, nodes):
             src, dst = node_dir / rel, assembled / rel
             assert src.stat().st_size == info["bytes"], rel
             if dst.exists():
-                assert dst.stat().st_size == src.stat().st_size, (
-                    f"Conflicting node metadata: {rel}"
-                )
+                assert dst.stat().st_size == src.stat().st_size, f"Conflicting node metadata: {rel}"
                 if info.get("sha256"):
-                    assert (
-                        hashlib.sha256(dst.read_bytes()).hexdigest() == info["sha256"]
-                    ), rel
+                    assert hashlib.sha256(dst.read_bytes()).hexdigest() == info["sha256"], rel
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
             os.link(src, dst)
     from safetensors import safe_open
 
     shards = list((assembled / "model").glob("*.safetensors"))
-    assert len(shards) >= world_size, (
-        f"Missing model shards: {len(shards)}/{world_size}"
-    )
+    assert len(shards) >= world_size, f"Missing model shards: {len(shards)}/{world_size}"
     for shard in shards:
         with safe_open(shard, framework="pt", device="cpu") as f:
             assert list(f.keys()), shard.name
@@ -168,15 +154,11 @@ def assemble_and_verify(incoming, name, world_size, nodes):
         metadata = pickle.load(f)  # Locally generated PyTorch DCP metadata only.
     for storage in metadata.storage_data.values():
         file = optim_dir / storage.relative_path
-        assert (
-            file.is_file() and file.stat().st_size >= storage.offset + storage.length
-        ), file
+        assert file.is_file() and file.stat().st_size >= storage.offset + storage.length, file
     assert len(list(optim_dir.glob("*.distcp"))) >= world_size
     for component in ("rng", "dataloader"):
         files = list((assembled / component).glob("*.pt"))
-        assert len(files) == world_size, (
-            f"Missing {component}: {len(files)}/{world_size}"
-        )
+        assert len(files) == world_size, f"Missing {component}: {len(files)}/{world_size}"
     for required in ("config.yaml", "losses.json", "step_scheduler.pt"):
         assert (assembled / required).is_file(), required
     complete = {
@@ -200,21 +182,17 @@ def assemble_and_verify(incoming, name, world_size, nodes):
     os.replace(best_pointer, BACKUP / "BEST")
     shutil.rmtree(incoming)
     # Before retiring any predecessor, recheck this complete new full-state
-    # backup and all eight nodes' retained original checkpoint shard sets.
+    # backup and all nodes' retained original checkpoint shard sets.
     from verify_checkpoint import verify_complete
 
     verify_complete(target)
     # Only this run's previously verified backups are eligible for deletion.
     for previous in BACKUP.glob("epoch_*_step_*"):
-        if (
-            previous != target
-            and previous.is_dir()
-            and (previous / "COMPLETE.json").is_file()
-        ):
+        if previous != target and previous.is_dir() and (previous / "COMPLETE.json").is_file():
             shutil.rmtree(previous)
     print(
         f"CHECKPOINT_BACKUP_COMPLETE path={target} model_shards={len(shards)} world_size={world_size} "
-        f"val_loss={validation_score(target)} fsx_policy=best1",
+        f"val_loss={validation_score(target)} backup_policy=best1",
         flush=True,
     )
 
@@ -232,7 +210,7 @@ def backup_checkpoint(path):
 
     def record_scores():
         # Bootstrap old local checkpoints made before this policy. Their full
-        # FSx backup contains rank-zero losses even on nodes without losses.json.
+        # shared storage backup contains rank-zero losses even on nodes without losses.json.
         for previous in LOCAL.glob("epoch_*_step_*"):
             if not previous.is_dir() or (previous / "score.json").exists():
                 continue
@@ -240,9 +218,7 @@ def backup_checkpoint(path):
             if previous_score is None:
                 previous_score = validation_score(BACKUP / previous.name)
             if previous_score is not None:
-                (previous / "score.json").write_text(
-                    json.dumps({"val_loss": previous_score})
-                )
+                (previous / "score.json").write_text(json.dumps({"val_loss": previous_score}))
         (path / "score.json").write_text(json.dumps({"val_loss": score}))
 
     collective_step(record_scores, coordinator)
@@ -256,7 +232,7 @@ def backup_checkpoint(path):
         )
         if not should_copy[0]:
             print(
-                f"CHECKPOINT_NVME_SAVED path={path} val_loss={score}; FSX_BEST_UNCHANGED "
+                f"CHECKPOINT_NVME_SAVED path={path} val_loss={score}; SHARED_BEST_UNCHANGED "
                 f"path={old} val_loss={old_score}",
                 flush=True,
             )
@@ -275,16 +251,14 @@ def backup_checkpoint(path):
     collective_step(initialize, rank == 0)
     device = torch.cuda.current_device() if dist.get_backend() == "nccl" else "cpu"
     local_bytes = (
-        sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
-        if coordinator
-        else 0
+        sum(f.stat().st_size for f in path.rglob("*") if f.is_file()) if coordinator else 0
     )
     total = torch.tensor(local_bytes, device=device, dtype=torch.int64)
     dist.all_reduce(total)
 
     def check_space():
         assert shutil.disk_usage(BACKUP).free > total.item() * 1.05 + 20 * 1024**3, (
-            "Insufficient FSx space for atomic backup"
+            "Insufficient shared storage space for atomic backup"
         )
 
     collective_step(check_space, rank == 0)
@@ -324,7 +298,7 @@ def install():
     def prune(lifecycle):
         if not local_config(lifecycle):
             return original_prune(lifecycle)
-        # Defer local retention until the complete global FSx backup is verified.
+        # Defer local retention until the complete global shared storage backup is verified.
 
     def update_best(lifecycle, *args, **kwargs):
         if not local_config(lifecycle):
@@ -333,9 +307,7 @@ def install():
 
     def save(recipe, epoch, step, *args, **kwargs):
         original_save(recipe, epoch, step, *args, **kwargs)
-        if recipe.checkpointer.config.enabled and local_config(
-            recipe.checkpointer.lifecycle
-        ):
+        if recipe.checkpointer.config.enabled and local_config(recipe.checkpointer.lifecycle):
             assert not recipe.checkpointer.config.is_async
             backup_checkpoint(LOCAL / f"epoch_{epoch}_step_{step}")
 

@@ -1,19 +1,18 @@
-"""Native full-string tokenization and assistant-only labels from the production pipeline."""
+"""Native Nemotron chat-template tokenization with assistant-only targets."""
 
 import copy
 import json
 import re
+
 import numpy as np
 
 
 def normalize(row):
-    trajectory = row.get("normalized_trajectory") or row["trajectory"]
+    trajectory = row if "messages" in row else row.get("normalized_trajectory") or row["trajectory"]
     messages = copy.deepcopy(trajectory["messages"])
     if row.get("normalized_trajectory"):
         steps = row["trajectory"]["steps"]
-        assert not any(s.get("user_content") for s in steps[1:]), (
-            "Unhandled later user feedback"
-        )
+        assert not any(s.get("user_content") for s in steps[1:]), "Unhandled later user feedback"
         assert steps[0]["user_content"] and steps[0]["system_prompt"]
         messages = [
             {"role": "system", "content": steps[0]["system_prompt"]},
@@ -49,7 +48,11 @@ def normalize(row):
         encoded = json.dumps(m, ensure_ascii=False)
         assert "<|im_start|>" not in encoded and "<|im_end|>" not in encoded
         result.append(m)
-    assert result[0]["role"] == "system" and result[1]["role"] == "user"
+    assert result, "Empty conversation"
+    first_user = 1 if result[0]["role"] == "system" else 0
+    assert len(result) > first_user and result[first_user]["role"] == "user", (
+        "Expected an optional system message followed by a user message"
+    )
     return result
 
 
@@ -96,11 +99,7 @@ def tokenize(messages, tokenizer, return_layout=False):
     labels[mask] = ids[mask]
     assert np.any(labels != -100)
     if return_layout:
-        boundaries = [
-            int(np.searchsorted(offsets[:, 0], match.start())) for match in spans
-        ]
-        assert all(
-            offsets[i, 0] == match.start() for i, match in zip(boundaries, spans)
-        )
+        boundaries = [int(np.searchsorted(offsets[:, 0], match.start())) for match in spans]
+        assert all(offsets[i, 0] == match.start() for i, match in zip(boundaries, spans))
         return ids, labels, boundaries
     return ids, labels

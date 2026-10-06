@@ -1,0 +1,1 @@
+{"task_id": "example-validation-task", "messages": [{"role": "system", "content": "You are a coding assistant."}, {"role": "user", "content": "What does pwd do?"}, {"role": "assistant", "reasoning_content": "The command reports the current working directory.", "content": "pwd prints the absolute path of the current working directory."}]}

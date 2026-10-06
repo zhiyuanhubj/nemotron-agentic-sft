@@ -4,9 +4,10 @@ This hook is dormant unless token_budget.enabled is set in the frozen config.
 It counts actual optimizer inputs, including sampler padding or repeated rows.
 """
 
-from pathlib import Path
+import json
+import os
 from datetime import datetime, timezone
-import json, os
+from pathlib import Path
 
 
 def trim_labels(batches, quota):
@@ -36,9 +37,7 @@ def consume(recipe, batches, original, limit, counter, max_grad_norm=None):
     import torch.distributed as dist
 
     local = sum(int((b["labels"] != -100).sum().item()) for b in batches)
-    global_count = int(
-        recipe._dp_allreduce(torch.tensor(local, dtype=torch.long)).item()
-    )
+    global_count = int(recipe._dp_allreduce(torch.tensor(local, dtype=torch.long)).item())
     remaining = int(limit) - counter["supervised_tokens"]
     assert remaining > 0, "Optimizer called after token budget completed"
     clipped = global_count > remaining
@@ -49,11 +48,7 @@ def consume(recipe, batches, original, limit, counter, max_grad_norm=None):
             counts = [local]
             rank = 0
         else:
-            device = (
-                torch.cuda.current_device()
-                if dist.get_backend(group) == "nccl"
-                else "cpu"
-            )
+            device = torch.cuda.current_device() if dist.get_backend(group) == "nccl" else "cpu"
             value = torch.tensor([local], dtype=torch.long, device=device)
             values = [torch.zeros_like(value) for _ in range(size)]
             dist.all_gather(values, value, group=group)
@@ -85,8 +80,8 @@ def install(config):
     options = config.get("token_budget", {})
     if not options.get("enabled"):
         return
+    import checkpoint_state
     from nemo_automodel.recipes.vlm.finetune import FinetuneRecipeForVLM
-    import nvme_checkpoint as nv
 
     mode = options.get("mode", "exact")
     assert mode in {"exact", "track_only"}
@@ -96,7 +91,7 @@ def install(config):
     restore = config.get("checkpoint", {}).get("restore_from")
     if restore:
         saved = json.loads((Path(restore) / "token_budget.json").read_text())
-        assert saved["limit"] == limit
+        assert saved["limit"] == limit and saved["mode"] == mode
         counter.update(saved["counter"])
     original = FinetuneRecipeForVLM._run_train_optim_step
     state = Path(os.environ["RUN_DIR"]) / "state/token_budget.json"
@@ -119,15 +114,8 @@ def install(config):
             tmp.replace(state)
         return data
 
-    prior_backup = nv.backup_checkpoint
-
-    def backup(path):
-        def persist():
-            assert state.is_file()
-            (path / "token_budget.json").write_text(state.read_text())
-
-        nv.collective_step(persist, int(os.environ.get("LOCAL_RANK", "0")) == 0)
-        return prior_backup(path)
+    checkpoint_state.register(
+        "token_budget", lambda: {"mode": mode, "limit": limit, "counter": dict(counter)}
+    )
 
     FinetuneRecipeForVLM._run_train_optim_step = step
-    nv.backup_checkpoint = backup

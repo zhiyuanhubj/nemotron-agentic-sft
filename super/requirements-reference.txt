@@ -1,4 +1,5 @@
-# Versions observed in the completed October 6 run; Automodel installed separately.
+# Supporting package versions for the reference environment.
+# Install training dependencies through the pinned Automodel checkout.
 numpy==1.26.4
 PyYAML==6.0.3
 transformers==5.12.1

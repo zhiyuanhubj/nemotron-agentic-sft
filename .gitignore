@@ -26,3 +26,6 @@ wandb/
 *.npy
 *.jsonl.gz
 *.distcp
+
+# Small public schema examples
+!examples/*.jsonl

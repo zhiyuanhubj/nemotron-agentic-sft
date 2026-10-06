@@ -1,8 +1,10 @@
 """Stop only sustained validation degradation while training loss improves."""
 
+import json
+import math
+import os
 from collections import deque
 from pathlib import Path
-import json, math, os
 
 
 class OverfitMonitor:
@@ -56,16 +58,39 @@ class OverfitMonitor:
 
 
 def install(config):
+    options = config.get("early_stopping")
+    if not options or options.get("enabled") is False:
+        return
+    import checkpoint_state
     import torch.distributed as dist
     from nemo_automodel.recipes.vlm.finetune import FinetuneRecipeForVLM
-    import nvme_checkpoint as nv
 
-    options = config["early_stopping"]
+    options = {k: v for k, v in options.items() if k != "enabled"}
     monitor = OverfitMonitor(**options)
+    restore = config.get("checkpoint", {}).get("restore_from")
+    if restore:
+        saved = json.loads((Path(restore) / "early_stopping.json").read_text())
+        if saved["options"] != options:
+            raise ValueError("Resume requires unchanged early-stopping options")
+        monitor.training.extend(saved["training"])
+        monitor.best = saved["best"] if saved["best"] is not None else float("inf")
+        monitor.best_train, monitor.bad = saved["best_train"], saved["bad"]
+        monitor.history = saved["history"]
     original_train = FinetuneRecipeForVLM.log_train_metrics
     original_val = FinetuneRecipeForVLM.log_val_metrics
-    original_backup = nv.backup_checkpoint
     state = Path(os.environ["RUN_DIR"]) / "state/early_stopping.json"
+
+    def snapshot():
+        return {
+            "options": options,
+            "history": monitor.history,
+            "training": list(monitor.training),
+            "best": monitor.best if math.isfinite(monitor.best) else None,
+            "best_train": monitor.best_train,
+            "bad": monitor.bad,
+        }
+
+    checkpoint_state.register("early_stopping", snapshot)
 
     def train(recipe, data):
         original_train(recipe, data)
@@ -76,12 +101,8 @@ def install(config):
         original_val(recipe, data)
         outcome = [None]
         if recipe.dist_env.is_main:
-            outcome[0] = monitor.observe_validation(
-                data.step, float(data.metrics["val_loss"])
-            )
-            state.write_text(
-                json.dumps({"options": options, "history": monitor.history}, indent=2)
-            )
+            outcome[0] = monitor.observe_validation(data.step, float(data.metrics["val_loss"]))
+            state.write_text(json.dumps({"options": options, "history": monitor.history}, indent=2))
             import wandb
 
             if wandb.run is not None:
@@ -99,14 +120,5 @@ def install(config):
             if recipe.dist_env.is_main:
                 print("EARLY_STOP_OVERFITTING", json.dumps(outcome[0]), flush=True)
 
-    def backup(path):
-        def persist():
-            if state.is_file():
-                (path / "early_stopping.json").write_text(state.read_text())
-
-        nv.collective_step(persist, int(os.environ.get("LOCAL_RANK", "0")) == 0)
-        return original_backup(path)
-
     FinetuneRecipeForVLM.log_train_metrics = train
     FinetuneRecipeForVLM.log_val_metrics = val
-    nv.backup_checkpoint = backup
