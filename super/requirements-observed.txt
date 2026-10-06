@@ -1,0 +1,10 @@
+# Versions observed in the completed October 6 run; Automodel installed separately.
+numpy==1.26.4
+PyYAML==6.0.3
+transformers==5.12.1
+safetensors==0.8.0
+torchdata==0.11.0
+wandb==0.28.0
+timm==1.0.22
+huggingface-hub==1.9.2
+# Runtime: Python 3.12, torch 2.10.0+cu130, CUDA toolkit 13.0.

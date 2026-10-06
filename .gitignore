@@ -15,3 +15,14 @@ hf_home/
 third_party/
 .resolved/
 .DS_Store
+
+# Super pipeline runtime artifacts
+raw/
+prepared/
+runs/
+state/
+wandb/
+*.key
+*.npy
+*.jsonl.gz
+*.distcp

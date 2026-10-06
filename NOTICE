@@ -8,3 +8,8 @@ Training itself is driven by NVIDIA NeMo Automodel:
 
 Some YAML recipes in `configs/` are derived from Automodel's Nemotron
 examples and retain NVIDIA's Apache-2.0 headers.
+
+The super/ pipeline contains the Nemotron-3.5-Super full-SFT snapshot
+prepared on October 6, 2026. patches/nemotron35-super-automodel.patch
+is based on NVIDIA NeMo Automodel commit 8cb12a35b65eda421d8f1fa485c658eb06d22c76.
+Model weights and checkpoint-bundled remote model code are not included.

@@ -1,0 +1,374 @@
+diff --git a/nemo_automodel/_transformers/registry.py b/nemo_automodel/_transformers/registry.py
+index 8c6d817..5868f68 100644
+--- a/nemo_automodel/_transformers/registry.py
++++ b/nemo_automodel/_transformers/registry.py
+@@ -199,6 +199,13 @@ MODEL_ARCH_MAPPING = OrderedDict(
+                 "NemotronOmniForConditionalGeneration",
+             ),
+         ),
++        (
++            "NemotronH_Omni_Reasoning_V3",
++            (
++                "nemo_automodel.components.models.nemotron_omni.model",
++                "NemotronOmniForConditionalGeneration",
++            ),
++        ),
+         (
+             "NemotronParseForConditionalGeneration",
+             ("nemo_automodel.components.models.nemotron_parse.model", "NemotronParseForConditionalGeneration"),
+diff --git a/nemo_automodel/components/datasets/vlm/collate_fns.py b/nemo_automodel/components/datasets/vlm/collate_fns.py
+index f99e1ad..cc35dbe 100644
+--- a/nemo_automodel/components/datasets/vlm/collate_fns.py
++++ b/nemo_automodel/components/datasets/vlm/collate_fns.py
+@@ -258,6 +258,7 @@ _IMSTART_TEMPLATE_PROCESSORS = frozenset(
+         "Qwen3VLProcessor",
+         "Qwen3VLMoeProcessor",
+         "Qwen3OmniMoeProcessor",
++        "NemotronH_Omni_Reasoning_V3Processor",
+     }
+ )
+ 
+@@ -1708,6 +1709,7 @@ def nemotron_omni_collate_fn(
+     examples: Sequence[Dict[str, Any]],
+     processor,
+     max_length: Optional[int] = None,
++    pad_to_max_length: bool = True,
+     max_video_frames: int = 8,
+ ) -> Dict[str, torch.Tensor]:
+     """Collate for NemotronOmni (image / video / audio).
+@@ -1819,7 +1821,11 @@ def nemotron_omni_collate_fn(
+ 
+         all_images.append(conv_images)
+         all_videos.append(conv_video)
+-        text = tokenizer.apply_chat_template(text_conversation, tokenize=False)
++        text = tokenizer.apply_chat_template(
++            text_conversation,
++            tokenize=False,
++            truncate_history_thinking=False,
++        )
+         texts.append(text)
+ 
+     all_input_ids: List[torch.Tensor] = []
+@@ -1853,7 +1859,13 @@ def nemotron_omni_collate_fn(
+ 
+     pad_token_id = getattr(tokenizer, "pad_token_id", None) or 0
+     seq_lengths = [ids.shape[0] for ids in all_input_ids]
+-    target_len = max_length if max_length is not None else max(seq_lengths)
++    batch_max_len = max(seq_lengths)
++    if max_length is None:
++        target_len = batch_max_len
++    elif pad_to_max_length:
++        target_len = max_length
++    else:
++        target_len = min(batch_max_len, max_length)
+ 
+     padded_input_ids = []
+     padded_attention_masks = []
+@@ -1932,7 +1944,7 @@ def nemotron_omni_collate_fn(
+             if "attention_mask" in audio_inputs:
+                 result["sound_attention_mask"] = audio_inputs["attention_mask"].to(torch.long)
+ 
+-    labels = build_labels(result["input_ids"], conversations, processor)
++    labels = build_labels_from_template(result["input_ids"], conversations, processor)
+     result["labels"] = labels[:, 1:]
+ 
+     input_shape = result["input_ids"].shape
+@@ -2134,6 +2146,7 @@ COLLATE_FNS = {
+     "KimiK25Processor": kimi_k25_vl_collate_fn,
+     "NemotronParseProcessor": nemotron_parse_collate_fn,
+     "NemotronH_Nano_Omni_Reasoning_V3Processor": nemotron_omni_collate_fn,
++    "NemotronH_Omni_Reasoning_V3Processor": nemotron_omni_collate_fn,
+     "LlavaOneVisionProcessor": llava_onevision_collate_fn,
+     "default": default_collate_fn,
+ }
+diff --git a/nemo_automodel/components/loss/mtp.py b/nemo_automodel/components/loss/mtp.py
+index 411baf0..3c3f7bc 100644
+--- a/nemo_automodel/components/loss/mtp.py
++++ b/nemo_automodel/components/loss/mtp.py
+@@ -17,6 +17,8 @@ from typing import Optional
+ 
+ import torch
+ import torch.nn as nn
++import torch.nn.functional as F
++from torch.distributed.tensor import DTensor
+ 
+ from nemo_automodel.components.loss.linear_ce import FusedLinearCrossEntropy
+ from nemo_automodel.components.loss.utils import (
+@@ -103,6 +105,24 @@ def calculate_mtp_loss(
+     if isinstance(loss_fn, FusedLinearCrossEntropy) and lm_weight is None:
+         lm_weight = _get_lm_head_weight(model)
+ 
++    # MTP is evaluated by the recipe after the wrapped model forward returns.
++    # With FSDP2 the shared LM-head parameter can therefore still be a DTensor
++    # while the returned MTP activations are local tensors.  A direct nn.Linear
++    # call would mix Tensor and DTensor operands.  Gather the head once and use
++    # that differentiable full tensor for every MTP depth; autograd propagates
++    # its accumulated gradient back to the sharded parameter.
++    dense_lm_weight = None
++    dense_lm_bias = None
++    if mtp_per_depth_h is not None and not isinstance(loss_fn, FusedLinearCrossEntropy):
++        lm_head = _get_lm_head_module(model)
++        if lm_head is None:
++            raise ValueError("lm_head module not found in model")
++        head_weight = lm_head.weight
++        if isinstance(head_weight, DTensor):
++            dense_lm_weight = head_weight.full_tensor()
++            head_bias = getattr(lm_head, "bias", None)
++            dense_lm_bias = head_bias.full_tensor() if isinstance(head_bias, DTensor) else head_bias
++
+     if seq_idx is None and cu_seqlens is not None:
+         cs = cu_seqlens
+         if cs.dim() == 2 and cs.shape[0] == 1:
+@@ -168,9 +188,14 @@ def calculate_mtp_loss(
+             lm_head = _get_lm_head_module(model)
+             if lm_head is None:
+                 raise ValueError("lm_head module not found in model")
++            logits = (
++                F.linear(mtp_output, dense_lm_weight, dense_lm_bias)
++                if dense_lm_weight is not None
++                else lm_head(mtp_output)
++            )
+             depth_loss = calculate_loss(
+                 loss_fn,
+-                logits=lm_head(mtp_output),
++                logits=logits,
+                 labels=masked,
+                 model=model,
+                 num_label_tokens=num_label_tokens,
+diff --git a/nemo_automodel/components/models/nemotron_omni/model.py b/nemo_automodel/components/models/nemotron_omni/model.py
+index d7461ab..c7d8b09 100644
+--- a/nemo_automodel/components/models/nemotron_omni/model.py
++++ b/nemo_automodel/components/models/nemotron_omni/model.py
+@@ -369,7 +369,34 @@ class NemotronOmniForConditionalGeneration(HFCheckpointingMixin, nn.Module, MoEF
+         from timm.layers.config import set_fused_attn as _timm_set_fused_attn
+ 
+         _timm_set_fused_attn(False)
+-        self.vision_model = AutoModel.from_config(vision_config, trust_remote_code=True)
++        try:
++            self.vision_model = AutoModel.from_config(vision_config, trust_remote_code=True)
++        except ValueError as exc:
++            # Some prerelease Omni checkpoints carry a nested RADIO config
++            # without an ``auto_map`` entry.  AutoModel cannot resolve that
++            # nested config even though the checkpoint bundles its model class.
++            if "Unrecognized configuration class" not in str(exc):
++                raise
++            from transformers.dynamic_module_utils import get_class_from_dynamic_module
++
++            model_root = getattr(config, "_name_or_path", None)
++            if not model_root:
++                raise
++            radio_cls = get_class_from_dynamic_module(
++                "modeling_radio.RadioModel",
++                model_root,
++                local_files_only=True,
++            )
++            self.vision_model = radio_cls(vision_config)
++            # Released RADIO weights predate explicit LayerScale parameters.
++            # The bundled config sets both scales to one, so identities are
++            # exactly equivalent and keep the model state aligned with the
++            # checkpoint.
++            for layer in getattr(getattr(self.vision_model, "encoder", None), "layer", []):
++                if hasattr(layer, "layer_scale1"):
++                    layer.layer_scale1 = nn.Identity()
++                if hasattr(layer, "layer_scale2"):
++                    layer.layer_scale2 = nn.Identity()
+         _timm_set_fused_attn(True)  # Restore default for any subsequent timm usage
+         # WAR for transformers issue 38358
+         if hasattr(self.vision_model, "model") and hasattr(self.vision_model.model, "_init_weights"):
+@@ -377,6 +404,8 @@ class NemotronOmniForConditionalGeneration(HFCheckpointingMixin, nn.Module, MoEF
+         # Make preprocessor external (required by RADIO)
+         if hasattr(self.vision_model, "radio_model"):
+             self.vision_model.radio_model.make_preprocessor_external()
++        elif hasattr(self.vision_model, "make_preprocessor_external"):
++            self.vision_model.make_preprocessor_external()
+ 
+         # 3D patch projector for temporally-packed video frames. Only present when the
+         # checkpoint ships a `patch_generator.video_embedder` weight (i.e. v3+).
+diff --git a/nemo_automodel/components/models/nemotron_omni/state_dict_adapter.py b/nemo_automodel/components/models/nemotron_omni/state_dict_adapter.py
+index af09f85..8ceb90e 100644
+--- a/nemo_automodel/components/models/nemotron_omni/state_dict_adapter.py
++++ b/nemo_automodel/components/models/nemotron_omni/state_dict_adapter.py
+@@ -127,6 +127,12 @@ class NemotronOmniStateDictAdapter(StateDictAdapter):
+         self.moe_config = moe_config
+         self.backend = backend
+         self.dtype = dtype
++        vision_config = getattr(config, "vision_config", None)
++        self._uses_transformers_radio = bool(
++            vision_config is not None
++            and hasattr(vision_config, "num_hidden_layers")
++            and hasattr(vision_config, "layerscale_value")
++        )
+ 
+         # Create the LLM state dict adapter (handles expert merging etc.)
+         self._llm_adapter = NemotronV3StateDictAdapter(
+@@ -136,6 +142,14 @@ class NemotronOmniStateDictAdapter(StateDictAdapter):
+             dtype=dtype,
+         )
+ 
++    @property
++    def view_loaded_native_keys(self) -> set[str]:
++        """Expert tensors that DCP loaded directly through adapter views."""
++        return {
++            f"language_model.{key}"
++            for key in self._llm_adapter.view_loaded_native_keys
++        }
++
+     def from_hf(
+         self,
+         hf_state_dict: dict[str, Any],
+@@ -176,7 +190,49 @@ class NemotronOmniStateDictAdapter(StateDictAdapter):
+ 
+             # 1. Vision model keys (pass through as-is)
+             if key.startswith("vision_model."):
+-                result[key] = value
++                if self._uses_transformers_radio and (
++                    key.startswith("vision_model.radio_model.input_conditioner.")
++                    or key == "vision_model.summary_idxs"
++                ):
++                    # The processor applies normalization, and the bundled
++                    # RADIO model externalizes this module during construction.
++                    pass
++                elif self._uses_transformers_radio and ".attn.qkv." in key:
++                    base = key.replace(
++                        "vision_model.radio_model.model.blocks.",
++                        "vision_model.encoder.layer.",
++                    ).replace(".attn.qkv.", ".attention.attention.{}.")
++                    for projection, chunk in zip(("query", "key", "value"), value.chunk(3, dim=0)):
++                        result[base.format(projection)] = chunk
++                elif self._uses_transformers_radio:
++                    new_key = key
++                    replacements = (
++                        (
++                            "vision_model.radio_model.model.patch_generator.video_embedder",
++                            "vision_model.embeddings.video_patch_projection",
++                        ),
++                        (
++                            "vision_model.radio_model.model.patch_generator.embedder",
++                            "vision_model.embeddings.patch_projection",
++                        ),
++                        (
++                            "vision_model.radio_model.model.patch_generator.pos_embed",
++                            "vision_model.embeddings.position_embedding",
++                        ),
++                        (
++                            "vision_model.radio_model.model.patch_generator.cls_token.token",
++                            "vision_model.embeddings.cls_register_token",
++                        ),
++                        ("vision_model.radio_model.model.blocks.", "vision_model.encoder.layer."),
++                        (".attn.proj.", ".attention.output.dense."),
++                        ("vision_model.radio_model.input_conditioner.", "vision_model.input_conditioner."),
++                        ("vision_model.radio_model.summary_idxs", "vision_model.summary_idxs"),
++                    )
++                    for old, new in replacements:
++                        new_key = new_key.replace(old, new)
++                    result[new_key] = value
++                else:
++                    result[key] = value
+                 debug_counts["vision_model"] += 1
+ 
+             # 2. Vision projector keys (mlp1.* -> vision_projector.*)
+@@ -272,6 +328,7 @@ class NemotronOmniStateDictAdapter(StateDictAdapter):
+         """
+         hf_result = {}
+         llm_state_dict = {}
++        radio_qkv = {}
+ 
+         for fqn in list(state_dict.keys()):
+             tensor = state_dict.pop(fqn)
+@@ -279,9 +336,48 @@ class NemotronOmniStateDictAdapter(StateDictAdapter):
+             if exclude_key_regex and re.match(exclude_key_regex, fqn):
+                 continue
+ 
+-            # Vision model (pass through)
++            # Vision model.  The released checkpoint uses the original
++            # timm/C-RADIO hierarchy while the bundled Transformers RADIO
++            # implementation exposes separate query/key/value projections.
++            # DCP loads into the dictionary returned here, so present fused qkv
++            # tensors and the original checkpoint names during base loading.
+             if fqn.startswith("vision_model."):
+-                hf_result[fqn] = tensor
++                if self._uses_transformers_radio:
++                    match = re.match(
++                        r"vision_model\.encoder\.layer\.(\d+)\.attention\.attention\.(query|key|value)\.(weight|bias)$",
++                        fqn,
++                    )
++                    if match:
++                        layer, projection, suffix = match.groups()
++                        radio_qkv.setdefault((layer, suffix), {})[projection] = tensor
++                        continue
++
++                    replacements = (
++                        (
++                            "vision_model.embeddings.video_patch_projection",
++                            "vision_model.radio_model.model.patch_generator.video_embedder",
++                        ),
++                        (
++                            "vision_model.embeddings.patch_projection",
++                            "vision_model.radio_model.model.patch_generator.embedder",
++                        ),
++                        (
++                            "vision_model.embeddings.position_embedding",
++                            "vision_model.radio_model.model.patch_generator.pos_embed",
++                        ),
++                        (
++                            "vision_model.embeddings.cls_register_token",
++                            "vision_model.radio_model.model.patch_generator.cls_token.token",
++                        ),
++                        ("vision_model.encoder.layer.", "vision_model.radio_model.model.blocks."),
++                        (".attention.output.dense.", ".attn.proj."),
++                    )
++                    new_fqn = fqn
++                    for old, new in replacements:
++                        new_fqn = new_fqn.replace(old, new)
++                    hf_result[new_fqn] = tensor
++                else:
++                    hf_result[fqn] = tensor
+ 
+             # Vision projector (custom -> HF)
+             elif fqn.startswith("vision_projector."):
+@@ -307,6 +403,19 @@ class NemotronOmniStateDictAdapter(StateDictAdapter):
+             else:
+                 hf_result[fqn] = tensor
+ 
++        for (layer, suffix), projections in radio_qkv.items():
++            missing = {"query", "key", "value"} - projections.keys()
++            if missing:
++                raise RuntimeError(
++                    f"Incomplete RADIO qkv projections for layer {layer} {suffix}: missing {sorted(missing)}"
++                )
++            hf_result[
++                f"vision_model.radio_model.model.blocks.{layer}.attn.qkv.{suffix}"
++            ] = torch.cat(
++                [projections[projection] for projection in ("query", "key", "value")],
++                dim=0,
++            )
++
+         # Convert LLM keys to HF format
+         converted_llm = self._llm_adapter.to_hf(llm_state_dict, exclude_key_regex=exclude_key_regex, **kwargs)
+ 
+diff --git a/tools/offline_hf_consolidation.py b/tools/offline_hf_consolidation.py
+index 01a3fa2..1aaf1c4 100644
+--- a/tools/offline_hf_consolidation.py
++++ b/tools/offline_hf_consolidation.py
+@@ -147,6 +147,12 @@ def parse_args() -> argparse.Namespace:
+         default="auto",
+         help="Distributed backend to initialize (default: auto).",
+     )
++    parser.add_argument(
++        "--timeout-minutes",
++        type=int,
++        default=1,
++        help="Distributed collective timeout in minutes (default: 1).",
++    )
+     parser.add_argument(
+         "--diffusers-compatible",
+         action="store_true",
+@@ -175,7 +181,7 @@ def main() -> None:
+     backend = args.backend
+     if backend == "auto":
+         backend = "nccl" if torch.cuda.device_count() > 0 else "gloo"
+-    initialize_distributed(backend)
++    initialize_distributed(backend, timeout_minutes=args.timeout_minutes)
+ 
+     os.makedirs(args.output_dir, exist_ok=True)
+ 
